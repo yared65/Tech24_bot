@@ -30,7 +30,7 @@ async def check_website_job(context: ContextTypes.DEFAULT_TYPE):
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            if "ያሬድ ግርማ" in soup.get_text() or "Yared Girma" in soup.get_text():
+            if "Adama" in soup.get_text() or "Yared Girma" in soup.get_text():
                 await context.bot.send_message(chat_id=chat_id, text="🔔 አዲስ የ ATM ስራ ተገኝቷል! ፈጥነህ እይ!")
             else:
                 logging.info("ፍተሻ ተጠናቋል፡ ምንም አዲስ መረጃ የለም።")
