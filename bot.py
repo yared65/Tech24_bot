@@ -57,7 +57,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_server():
     server = HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), HealthCheckHandler)
     server.serve_forever()
-
+    print(f"DEBUG: BOT_TOKEN is {os.getenv('BOT_TOKEN')}")
+ 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     application = Application.builder().token(BOT_TOKEN).build()
