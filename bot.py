@@ -90,8 +90,28 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text("🛑 የቴክ24 ክትትል በጊዜያዊነት ቆሟል።")
 
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+
+
+
+
 def main():
     # ቦቱን ማስነሳት
+     threading.Thread(target=run_health_server, daemon=True).start()
     application = Application.builder().token(BOT_TOKEN).build()
 
     # የቴሌግራም ትዕዛዞችን (Commands) መመዝገብ
@@ -101,5 +121,6 @@ def main():
     # ቦቱን በቋሚነት ማሰራት (Render ላይ ሳይቋረጥ እንዲሰራ)
     application.run_polling()
 
-if name == 'main':
-    main()
+
+    if __name__ == '__main__':
+       main()
