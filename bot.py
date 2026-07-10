@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 EMAIL = os.getenv('EMAIL')
 PASSWORD = os.getenv('PASSWORD')
