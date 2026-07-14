@@ -45,7 +45,6 @@ async def scrape_website_cases():
     login_url = 'https://api.tech24et.com/api/login'
     api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
 
-    # ለሎግኢን የሚያስፈልጉ መሰረታዊ ሄደሮች
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
@@ -62,20 +61,20 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as session:
         try:
-            # ሀ. መጀመሪያ CSRF Cookie ለማግኘት ጥሪ እናደርጋለን
+            # ሀ. CSRF Cookie ማግኘት
             csrf_response = await session.get(csrf_url)
             logging.info(f"CSRF cookie status: {csrf_response.status_code}")
 
-            # ለ. ከኩኪው ውስጥ XSRF-TOKEN የሚለውን ፈልገን በሄደር ውስጥ እናስገባለን (ይህ 419 ስህተትን ይፈታል!)
+            # ለ. XSRF-TOKEN በሄደር ውስጥ ማካተት
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if xsrf_token:
                 decoded_token = urllib.parse.unquote(xsrf_token)
                 session.headers.update({
                     'X-XSRF-TOKEN': decoded_token
                 })
-                logging.info("X-XSRF-TOKEN successfully injected into headers.")
+                logging.info("X-XSRF-TOKEN successfully injected.")
             else:
-                logging.warning("XSRF-TOKEN cookie not found in the initial request!")
+                logging.warning("XSRF-TOKEN cookie not found!")
 
             # ሐ. ሎግኢን ማድረግ
             login_response = await session.post(login_url, json=login_data)
@@ -92,29 +91,60 @@ async def scrape_website_cases():
                 return [], f"Failed to fetch data! Status: {response.status_code}"
 
             data = response.json()
-            cases_list = data.get('data', data) if isinstance(data, dict) else data
+            if not data:
+                return [], "Error: API returned empty response!"
+
+            # የላራቬልን 'data' ኬይ በጥንቃቄ መፈተሽ
+            cases_list = None
+            if isinstance(data, dict):
+                cases_list = data.get('data')
+                if cases_list is None:
+                    cases_list = data
+            else:
+                cases_list = data
 
             if not isinstance(cases_list, list):
-                return [], "Error: API response format is invalid!"
+                return [], "Error: API response data format is not a list!"
 
             scraped_cases = []
             for item in cases_list:
+                # ማንኛውም ባዶ (None) የሆነን አባል መዝለል
+                if not item or not isinstance(item, dict):
+                    continue
+                
                 case_id = str(item.get('id', ''))
                 
-                # የባንክ፣ ዲስትሪክትና ቅርንጫፍ መረጃዎችን መውሰድ
+                # የባንክ መረጃን በጥንቃቄ መውሰድ
                 bank_info = item.get('bank')
-                bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
+                bank = ""
+                if isinstance(bank_info, dict):
+                    bank = bank_info.get('name', '')
+                elif bank_info is not None:
+                    bank = str(bank_info)
 
+                # የዲስትሪክት መረጃን በጥንቃቄ መውሰድ
                 district_info = item.get('district')
-                district = district_info.get('name', '') if isinstance(district_info, dict) else str(district_info or '')
+                district = ""
+                if isinstance(district_info, dict):
+                    district = district_info.get('name', '')
+                elif district_info is not None:
+                    district = str(district_info)
 
+                # የቅርንጫፍ መረጃን በጥንቃቄ መውሰድ
                 branch_info = item.get('branch')
-                branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
+                branch = ""
+                if isinstance(branch_info, dict):
+                    branch = branch_info.get('name', '')
+                elif branch_info is not None:
+                    branch = str(branch_info)
 
-                issue = item.get('issue', '')
-                date_str = item.get('created_at', '')[:10] if item.get('created_at') else ''
+                issue = str(item.get('issue') or '')
                 
-                status = item.get('status', 'Pending')
+                # የቀን መረጃ
+                created_at = item.get('created_at')
+                date_str = str(created_at)[:10] if created_at else ""
+                
+                status = str(item.get('status') or 'Pending')
                 status_text = "Completed" if status == "Complete" else "Pending"
 
                 # Adama District መረጃዎችን ብቻ መለየት
@@ -166,9 +196,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 ለአዳማ ዲስትሪክት የተመዘገበ ምንም አይነት ኬዝ አልተገኘም።")
         return
 
-    # ሪፖርት መገንባት
     report_msg = "📋 **የAdama District የቅርብ ጊዜ ኬዞች ሪፖርት** 📋\n\n"
-    for i, case in enumerate(cases[:15], 1): # እስከ 15 ኬዞችን እንዲያሳይ
+    for i, case in enumerate(cases[:15], 1): # እስከ 15 ኬዞችን ለማሳየት
         status_icon = "✅" if case['status'] == "Completed" else "⏳"
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
@@ -198,7 +227,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     report_msg = "⏳ **የAdama District በመጠባበቅ ላይ ያሉ (Pending) ኬዞች** ⏳\n\n"
-    for i, case in enumerate(pending_cases, 1):
+    for i, case in enumerate(pending_cases[:15], 1):
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
             f"🏦 **Bank:** {case['bank']} ({case['branch']})\n"
@@ -209,23 +238,56 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(report_msg, parse_mode="Markdown")
 
+# /monthly ትዕዛዝ (የወሩ ማጠቃለያ)
+async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 የወሩን ማጠቃለያ ሪፖርት በማዘጋጀት ላይ...")
+    
+    cases, status_msg = await scrape_website_cases()
+    
+    if status_msg != "OK":
+        await update.message.reply_text(f"❌ ስህተት አጋጥሟል፦\n{status_msg}")
+        return
+
+    if not cases:
+        await update.message.reply_text("📭 ምንም አይነት መረጃ አልተገኘም።")
+        return
+
+    total_cases = len(cases)
+    completed_cases = len([c for c in cases if c['status'] == "Completed"])
+    pending_cases = total_cases - completed_cases
+    
+    # የስኬት ፐርሰንት ማስላት
+    success_rate = (completed_cases / total_cases * 100) if total_cases > 0 else 0
+
+    monthly_msg = (
+        f"📊 **የAdama District የወሩ ማጠቃለያ ሪፖርት** 📊\n\n"
+        f"📁 **ጠቅላላ የኬዞች ብዛት:** {total_cases}\n"
+        f"✅ **የተጠናቀቁ (Completed):** {completed_cases}\n"
+        f"⏳ **በመጠባበቅ ላይ (Pending):** {pending_cases}\n"
+        f"📈 **የአፈጻጸም ምጣኔ (Success Rate):** {success_rate:.1f}%\n\n"
+        f"🎈 ሰላም ስራ!"
+    )
+    
+    await update.message.reply_text(monthly_msg, parse_mode="Markdown")
+
 # 6. ዋናው ማስነሻ (Main Function)
 def main():
     if not BOT_TOKEN:
         logging.error("TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # ሀ. የጤና መፈተሻ ሰርቨሩን በሌላ Thread ላይ ማስጀመር (Render እንዳይዘጋው)
+    # ሀ. የጤና መፈተሻ ሰርቨሩን ማስጀመር (Render እንዳይዘጋው)
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
     # ለ. የቴሌግራም ቦት መተግበሪያን መፍጠር
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # ሐ. ትዕዛዞችን ማገናኘት (Handlers)
+    # ሐ. ትዕዛዞችን ማገናኘት (Handlers) - /monthly እዚህ ጋር በትክክል ተጨምሯል!
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("monthly", monthly_command))
 
     # መ. ቦቱን ስራ ማስጀመር
     logging.info("Bot is starting polling...")
