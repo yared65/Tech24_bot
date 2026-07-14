@@ -25,37 +25,34 @@ sent_cases = set()
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- የዌብሳይት መረጃዎችን በአይነትና በራስጌ (Header) ለይቶ የሚያመጣ ብልጥ ተግባር ---
+# --- አስተማማኝ Scraper ለአዲሱ የሰንጠረዥ መዋቅር ---
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
         return [], "Error: EMAIL or PASSWORD environment variables are not set on Render!"
         
-    login_data = {'email': EMAIL, 'password': PASSWORD, 'submit': 'Login'}
+    login_url = 'https://tech24et.com/client/index.php'
+    target_url = 'https://tech24et.com/client/cases.php'
     
-    async with httpx.AsyncClient(follow_redirects=True) as session:
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
+    
+    login_data = {
+        'email': EMAIL,
+        'password': PASSWORD,
+        'submit': 'Login'
+    }
+    
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0) as session:
         try:
-            # 1. ትክክለኛውን URL በራሱ ጊዜ ማወቅ
-            test_url = 'https://tech24et.com/cases'
-            try:
-                response = await session.get(test_url)
-                if response.status_code == 404:
-                    target_url = 'https://tech24et.com/client/cases.php'
-                    login_url = 'https://tech24et.com/client/index.php'
-                else:
-                    target_url = test_url
-                    login_url = str(response.url)
-                    if "cases" in login_url:
-                        login_url = 'https://tech24et.com/index.php'
-            except Exception:
-                target_url = 'https://tech24et.com/client/cases.php'
-                login_url = 'https://tech24et.com/client/index.php'
-                
-            logging.info(f"Using Login URL: {login_url}")
-            logging.info(f"Using Cases URL: {target_url}")
+            # 1. መጀመሪያ ሎግኢን ገጹን መክፈት
+            await session.get(login_url)
             
-            # 2. Login ማድረግ
+            # 2. ሎግኢን ማድረግ (POST)
             login_response = await session.post(login_url, data=login_data)
-            logging.info(f"Login POST completed with status: {login_response.status_code}")
+            logging.info(f"Login POST status: {login_response.status_code}")
             
             # 3. የኬዞችን ገጽ መውሰድ
             cases_response = await session.get(target_url)
@@ -63,75 +60,37 @@ async def scrape_website_cases():
                 return [], f"Error: Received HTTP {cases_response.status_code} from {target_url}"
                 
             soup = BeautifulSoup(cases_response.text, 'html.parser')
-            table = soup.find('table')
+            
+            # ሰንጠረዡን በ ID መፈለግ (በፎቶ 2907.jpg መሰረት)
+            table = soup.find('table', {'id': 'example1'}) or soup.find('table')
             
             if not table:
-                # Login መሳካቱን መፈተሽ
-                if soup.find('form') or "login" in cases_response.text.lower():
-                    return [], "Error: Login failed! (The website redirected us back to a login form. Please double-check your EMAIL and PASSWORD in Render's Environment Variables)"
-                return [], "Error: Website table not found! (Are you sure this is the correct cases page?)"
+                if "login" in cases_response.text.lower() or soup.find('form'):
+                    return [], "Error: Login session failed! Please check if your EMAIL and PASSWORD are correct."
+                return [], "Error: Table 'example1' not found on the page!"
                 
-            # 4. ዓምዶችን (Columns) በስማቸው በራስ-ሰር መለየት
-            headers = []
-            thead = table.find('thead')
-            if thead:
-                headers = [th.text.strip().lower() for th in thead.find_all('th')]
-            else:
-                first_row = table.find('tr')
-                if first_row:
-                    headers = [th.text.strip().lower() for th in first_row.find_all(['th', 'td'])]
-            
-            idx_case_id = 1
-            idx_bank = 2
-            idx_district = 3
-            idx_branch = 4
-            idx_issue = 5
-            idx_status = -1
-            
-            for i, h in enumerate(headers):
-                if "case id" in h:
-                    idx_case_id = i
-                elif "bank" in h:
-                    idx_bank = i
-                elif "district" in h:
-                    idx_district = i
-                elif "branch" in h:
-                    idx_branch = i
-                elif "case type" in h or "issue" in h:
-                    idx_issue = i
-                elif "status" in h:
-                    idx_status = i
-
-            # 5. መረጃዎችን መለየት (Tbody ካለ እሱን መጠቀም)
+            # ረድፎችን ማውጣት
             tbody = table.find('tbody')
-            if tbody:
-                rows = tbody.find_all('tr')
-            else:
-                rows = table.find_all('tr')[1:]
+            rows = tbody.find_all('tr') if tbody else table.find_all('tr')[1:]
                 
             scraped_cases = []
             for row in rows:
                 cols = row.find_all('td')
-                if len(cols) > max(idx_case_id, idx_bank, idx_district, idx_branch, idx_issue):
-                    case_id = cols[idx_case_id].text.strip()
-                    bank = cols[idx_bank].text.strip()
-                    district = cols[idx_district].text.strip()
-                    branch = cols[idx_branch].text.strip()
-                    issue = cols[idx_issue].text.strip()
+                # ቢያንስ 8 ዓምዶች መኖራቸውን ማረጋገጥ (በፎቶው መሰረት)
+                if len(cols) >= 8:
+                    case_id = cols[1].text.strip()
+                    bank = cols[2].text.strip()
+                    district = cols[3].text.strip()
+                    branch = cols[4].text.strip()
+                    issue = cols[5].text.strip()
+                    date_str = cols[6].text.strip()
                     
-                    status = "Pending"
-                    if idx_status != -1 and idx_status < len(cols):
-                        status = cols[idx_status].text.strip()
+                    # ስታተስ ለመወሰን፡ በ Action (8ኛው ዓምድ) ውስጥ "Complete" የሚል ሊንክ ካለ Pending ነው፣ ካልሆነ Completed ነው።
+                    action_html = str(cols[7])
+                    if "Complete" in cols[7].text or "cases.php?id=" in action_html:
+                        status = "Pending"
                     else:
-                        if "completed" in row.text.lower():
-                            status = "Completed"
-                    
-                    time_val = "1h"
-                    date_str = datetime.now().strftime("%d/%m/%Y")
-                    row_text = row.text.strip()
-                    match = re.search(r'\d{2}/\d{2}/\d{4}', row_text)
-                    if match:
-                        date_str = match.group(0)
+                        status = "Completed"
                             
                     scraped_cases.append({
                         'case_id': case_id,
@@ -139,13 +98,13 @@ async def scrape_website_cases():
                         'district': district,
                         'branch': branch,
                         'issue': issue,
-                        'time_val': time_val,
+                        'time_val': "1h",
                         'status': status,
                         'date': date_str
                     })
                     
             if not scraped_cases:
-                return [], "Success: Connected, but 0 total cases found in the table."
+                return [], "Success: Connected, but found 0 cases in the table."
                 
             return scraped_cases, "OK"
             
@@ -159,8 +118,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in context.job_queue.get_jobs_by_name(str(chat_id)):
         job.schedule_removal()
     
+    # በየ15 ደቂቃው (900 ሰከንድ) አዳዲስ ኬዞችን እንዲፈትሽ ማድረግ
     context.job_queue.run_repeating(check_website_job, interval=900, first=5, chat_id=chat_id, name=str(chat_id))
-    await update.message.reply_text("✅ የAdama District ክትትል ተጀምሯል።")
+    await update.message.reply_text("✅ የAdama District የኬዞች ክትትል በስኬት ተጀምሯል።")
 
 async def check_website_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
@@ -168,7 +128,8 @@ async def check_website_job(context: ContextTypes.DEFAULT_TYPE):
     
     if status == "OK":
         for c in cases:
-            if "adama" in c['district'].lower() and c['case_id'] not in sent_cases:
+            # ለAdama ዲስትሪክት እና ገና ላልተላኩ አዳዲስ ኬዞች ብቻ ማሳወቂያ መላክ
+            if "adama" in c['district'].lower() and c['case_id'] not in sent_cases and c['status'] == "Pending":
                 message = (
                     f"🔔 **ATM Incident Notification**\n\n"
                     f"📄 **ID:** {c['case_id']}\n"
@@ -176,11 +137,12 @@ async def check_website_job(context: ContextTypes.DEFAULT_TYPE):
                     f"⚠️ **Issue:** {c['issue']}\n"
                     f"🏢 **Branch:** {c['branch']}\n"
                     f"📍 **District:** {c['district']}\n"
+                    f"📅 **Date:** {c['date']}\n"
                 )
-                await context.bot.send_message(chat_id=chat_id, text=message)
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
                 sent_cases.add(c['case_id'])
 
-# --- 2. /pending (finding - የፔንዲንግ ኬዞች ዝርዝር) ---
+# --- 2. /pending ---
 async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የፔንዲንግ መረጃዎችን ከዌብሳይቱ ላይ በመፈለግ ላይ...")
     cases, status = await scrape_website_cases()
@@ -189,7 +151,7 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ ስህተት አጋጥሟል፦\n`{status}`", parse_mode="Markdown")
         return
         
-    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
+    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'] == "Pending"]
     
     if not adama_pending:
         await update.message.reply_text("📭 ለAdama District ምንም ፔንዲንግ (Pending) ኬዝ አልተገኘም።")
@@ -197,19 +159,18 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     keyboard = []
     for c in adama_pending:
-        btn_text = f"{c['case_id']} | {c['bank']} | {c['branch']} | {c['time_val']}"
+        btn_text = f"{c['case_id']} | {c['bank']} | {c['branch']}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_{c['case_id']}")])
         
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "The following ATM cases have been reported and are currently pending action. "
-        "select a case from the list below to view details and proceed with resolution.",
+        "የሚከተሉት የኤቲኤም ኬዞች ክፍት ናቸው። ዝርዝር መረጃ ለማየት እና ለመዝጋት አንዱን ይምረጡ፦",
         reply_markup=reply_markup
     )
 
-# --- 3. /terminate (Completed case) ---
+# --- 3. /terminate ---
 async def terminate_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ለመዝጋት የሚሆኑ ኬዞችን በመፈለግ ላይ...")
     cases, status = await scrape_website_cases()
@@ -218,7 +179,7 @@ async def terminate_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ ስህተት አጋጥሟል፦\n`{status}`", parse_mode="Markdown")
         return
         
-    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
+    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'] == "Pending"]
     
     if not adama_pending:
         await update.message.reply_text("📭 ለመዝጋት (Terminate ለማድረግ) የሚሆን ፔንዲንግ ኬዝ አልተገኘም።")
@@ -237,7 +198,7 @@ async def terminate_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# --- 4. /report (Weekly Activity - ሳምንታዊ ሪፖርት) ---
+# --- 4. /report ---
 async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የሳምንት ሪፖርት እየተዘጋጀ ነው...")
     cases, status = await scrape_website_cases()
@@ -271,7 +232,7 @@ async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("\n".join(report_lines))
 
-# --- 5. /monthly (monthly Report - Excel ሪፖርት) ---
+# --- 5. /monthly (Excel ሪፖርት) ---
 async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 የ 1 ወር የ Excel ሪፖርት እየተዘጋጀ ነው...")
     cases, status = await scrape_website_cases()
@@ -362,12 +323,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ **Issue:** {case['issue']}\n"
             f"🏢 **Branch:** {case['branch']}\n"
             f"📍 **District:** {case['district']}\n"
-            f"⏰ **Time:** {case['time_val']}\n"
+            f"📅 **Date:** {case['date']}\n"
             f"📊 **Status:** {case['status']}\n"
         )
         
         keyboard = [
-            [InlineKeyboardButton("✅ Complete/Terminate Case", callback_data=f"term_{case_id}")],
+            [InlineKeyboardButton("✅ Complete Case (ዝጋ)", callback_data=f"term_{case_id}")],
             [InlineKeyboardButton("⬅️ Back to List", callback_data="back_to_pending")]
         ]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -379,7 +340,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ ስህተት፦ `{status}`", parse_mode="Markdown")
             return
             
-        adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
+        adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'] == "Pending"]
         
         if not adama_pending:
             await query.edit_message_text("📭 ለAdama District ምንም ፔንዲንግ ኬዝ አልተገኘም።")
@@ -387,13 +348,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         keyboard = []
         for c in adama_pending:
-            btn_text = f"{c['case_id']} | {c['bank']} | {c['branch']} | {c['time_val']}"
+            btn_text = f"{c['case_id']} | {c['bank']} | {c['branch']}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_{c['case_id']}")])
             
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await query.edit_message_text(
-            "The following ATM cases have been reported and are currently pending action. "
-            "select a case from the list below to view details and proceed with resolution.",
+            "የሚከተሉት የኤቲኤም ኬዞች ክፍት ናቸው። ዝርዝር ለማየት አንዱን ይምረጡ፦",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
@@ -401,44 +361,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         case_id = data.split("_")[1]
         await query.edit_message_text(f"⏳ ኬዝ ID {case_id}-ን ከዌብሳይቱ ላይ ለመዝጋት እየሞከርኩ ነው...")
         
+        login_url = 'https://tech24et.com/client/index.php'
+        terminate_url = 'https://tech24et.com/client/cases.php'
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         login_data = {'email': EMAIL, 'password': PASSWORD, 'submit': 'Login'}
-        async with httpx.AsyncClient(follow_redirects=True) as session:
+        
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True) as session:
             try:
-                # Login ለማወቅ መጀመሪያ መሞከር
-                test_url = 'https://tech24et.com/cases'
-                try:
-                    response = await session.get(test_url)
-                    if response.status_code == 404:
-                        login_url = 'https://tech24et.com/client/index.php'
-                    else:
-                        login_url = str(response.url)
-                        if "cases" in login_url:
-                            login_url = 'https://tech24et.com/index.php'
-                except Exception:
-                    login_url = 'https://tech24et.com/client/index.php'
-
+                # 1. ሎግኢን ማድረግ
+                await session.get(login_url)
                 await session.post(login_url, data=login_data)
                 
-                # Update ማድረግ
-                terminate_url = 'https://tech24et.com/client/cases.php'
-                if "client" not in login_url:
-                    terminate_url = 'https://tech24et.com/cases'
-                    
+                # 2. በፎቶ 2910.jpg ላይ ያለውን ትክክለኛ የፎርም ዳታ (POST) መላክ
                 payload = {
-                    'case_id': case_id,
-                    'action': 'complete',
-                    'status': 'Completed',
-                    'submit': 'Update'
+                    'id': case_id,             # የኬዝ መለያ (id)
+                    'status': 'Completed',     # ሁኔታው
+                    'remark': 'Resolved via Telegram Bot',
+                    'update': 'Update'         # ሰብሚት ቁልፍ ስም (update)
                 }
                 response = await session.post(terminate_url, data=payload)
                 
                 if response.status_code == 200:
-                    await query.edit_message_text(f"✅ Case **{case_id}** on the website has been successfully marked as Completed/Terminated! 🎉", parse_mode="Markdown")
+                    await query.edit_message_text(f"✅ Case **{case_id}** በተሳካ ሁኔታ በዌብሳይቱ ላይ ተዘግቷል! 🎉", parse_mode="Markdown")
                 else:
-                    await query.edit_message_text(f"⚠️ Case {case_id} update sent, but server returned status: {response.status_code}")
+                    await query.edit_message_text(f"⚠️ Case {case_id} ለማዘመን ተሞክሯል፣ ነገር ግን አገልጋዩ የመለሰው ኮድ: {response.status_code}")
             except Exception as e:
                 logging.error(f"Error terminating case {case_id}: {e}")
-                await query.edit_message_text(f"❌ Error: ኬዙን በዌብሳይቱ ላይ መዝጋት አልተቻለም።")
+                await query.edit_message_text(f"❌ ስህተት፡ ኬዙን በዌብሳይቱ ላይ መዝጋት አልተቻለም።")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -453,11 +405,11 @@ def run_health_server():
 
 async def post_init(application: Application):
     await application.bot.set_my_commands([
-        BotCommand("start", "Start Bot"),
-        BotCommand("pending", "finding"),
-        BotCommand("terminate", "Completed case"),
-        BotCommand("report", "Weekly Activity"),
-        BotCommand("monthly", "monthly Report")
+        BotCommand("start", "የክትትል ስራ ማስጀመሪያ"),
+        BotCommand("pending", "ክፍት ኬዞችን ማሳያ"),
+        BotCommand("terminate", "ኬዝ ለመዝጋት መምረጫ"),
+        BotCommand("report", "ሳምንታዊ የስራ ሪፖርት"),
+        BotCommand("monthly", "ወርሃዊ የኤክሴል ሪፖርት")
     ])
 
 def main():
@@ -476,7 +428,7 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_report))
     application.add_handler(CallbackQueryHandler(callback_handler))
     
-    print("Bot is running with custom menus...")
+    print("Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
