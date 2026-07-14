@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import threading
-import urllib.parse  # ይህ እንዳይረሳ እዚህ ጋር በትክክል ተቀምጧል!
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 from telegram import Update
@@ -41,10 +41,10 @@ async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
         return [], "Error: EMAIL or PASSWORD environment variables are not set on Render!"
 
-    # የኤፒአይ ሊንኮችን ወደ ዋናው tech24et.com ዶሜን አስተካክለናል (DNS ስህተትን ለመፍታት)
-    csrf_url = 'https://tech24et.com/sanctum/csrf-cookie'
-    login_url = 'https://tech24et.com/api/login'
-    api_url = 'https://tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
+    # ወደ ትክክለኛው የኤፒአይ ሰብ-ዶሜን (api.) ተመልሷል
+    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
+    login_url = 'https://api.tech24et.com/api/login'
+    api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -60,7 +60,8 @@ async def scrape_website_cases():
         'password': PASSWORD
     }
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as session:
+    # SSL ቬሪፊኬሽን ችግር እንዳይፈጥር እዚህ ጋር verify=False አድርገነዋል
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
             # ሀ. CSRF Cookie ለማግኘት ጥሪ እናደርጋለን
             csrf_response = await session.get(csrf_url)
@@ -91,11 +92,16 @@ async def scrape_website_cases():
             if response.status_code != 200:
                 return [], f"Failed to fetch data! Status: {response.status_code}"
 
-            data = response.json()
+            # 💡 የJSON ፎርማት ስህተትን ለመከላከል ጥብቅ ፍተሻ
+            try:
+                data = response.json()
+            except ValueError:
+                logging.error("API response is not valid JSON!")
+                return [], "Error: API returned HTML/text instead of JSON. Please check credentials or API status."
+
             if not data:
                 return [], "Error: API returned empty response!"
 
-            # የላራቬልን 'data' ኬይ በጥንቃቄ መፈተሽ
             cases_list = None
             if isinstance(data, dict):
                 cases_list = data.get('data')
@@ -147,8 +153,8 @@ async def scrape_website_cases():
                 status = str(item.get('status') or 'Pending')
                 status_text = "Completed" if status == "Complete" else "Pending"
 
-                # Adama District መረጃዎችን ብቻ መለየት
-                if "adama" in district.lower():
+                # 💡 "Adama" ብቻ የሆኑትን ዲስትሪክቶች መለየት (exact match)
+                if district.strip().lower() == "adama":
                     scraped_cases.append({
                         'case_id': case_id,
                         'bank': bank,
@@ -174,9 +180,9 @@ async def scrape_website_cases():
 # /start ትዕዛዝ
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 እንኳን ወደ Tech24 Adama District መከታተያ ቦት በሰላም መጡ!\n\n"
+        "👋 እንኳን ወደ Tech24 Adama መከታተያ ቦት በሰላም መጡ!\n\n"
         "የሚከተሉትን ትዕዛዞች ይጠቀሙ፦\n"
-        "📋 /report - የሁሉንም ኬዞች ሪፖርት ለማግኘት\n"
+        "📋 /report - የAdama ኬዞች ሪፖርት ለማግኘት\n"
         "⏳ /pending - ያልተጠናቀቁ (Pending) ኬዞችን ብቻ ለማየት\n"
         "📊 /monthly - የወሩን ማጠቃለያ ሪፖርት ለማየት"
     )
@@ -184,7 +190,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /report ትዕዛዝ
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ የAdama District መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፣ እባክዎ ትንሽ ይጠብቁ...")
+    await update.message.reply_text("⏳ የAdama መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፣ እባክዎ ትንሽ ይጠብቁ...")
     
     cases, status_msg = await scrape_website_cases()
     
@@ -193,11 +199,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not cases:
-        await update.message.reply_text("📭 ለአዳማ ዲስትሪክት የተመዘገበ ምንም አይነት ኬዝ አልተገኘም።")
+        await update.message.reply_text("📭 ለAdama የተመዘገበ ምንም አይነት ኬዝ አልተገኘም።")
         return
 
-    report_msg = "📋 **የAdama District የቅርብ ጊዜ ኬዞች ሪፖርት** 📋\n\n"
-    for i, case in enumerate(cases[:15], 1): # እስከ 15 ኬዞችን ለማሳየት
+    report_msg = "📋 **የAdama የቅርብ ጊዜ ኬዞች ሪፖርት** 📋\n\n"
+    for i, case in enumerate(cases[:15], 1):
         status_icon = "✅" if case['status'] == "Completed" else "⏳"
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
@@ -212,7 +218,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /pending ትዕዛዝ
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ያልተጠናቀቁ ኬዞችን በመፈለግ ላይ...")
+    await update.message.reply_text("⏳ ያልተጠናቀቁ የAdama ኬዞችን በመፈለግ ላይ...")
     
     cases, status_msg = await scrape_website_cases()
     
@@ -223,10 +229,10 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_cases = [c for c in cases if c['status'] == "Pending"]
 
     if not pending_cases:
-        await update.message.reply_text("✅ ሁሉም የAdama District ኬዞች ተጠናቀዋል! ምንም Pending የለም።")
+        await update.message.reply_text("✅ ሁሉም የAdama ኬዞች ተጠናቀዋል! ምንም Pending የለም።")
         return
 
-    report_msg = "⏳ **የAdama District በመጠባበቅ ላይ ያሉ (Pending) ኬዞች** ⏳\n\n"
+    report_msg = "⏳ **የAdama በመጠባበቅ ላይ ያሉ (Pending) ኬዞች** ⏳\n\n"
     for i, case in enumerate(pending_cases[:15], 1):
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
@@ -240,7 +246,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /monthly ትዕዛዝ (የወሩ ማጠቃለያ)
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 የወሩን ማጠቃለያ ሪፖርት በማዘጋጀት ላይ...")
+    await update.message.reply_text("📊 የAdama የወሩን ማጠቃለያ ሪፖርት በማዘጋጀት ላይ...")
     
     cases, status_msg = await scrape_website_cases()
     
@@ -259,7 +265,7 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success_rate = (completed_cases / total_cases * 100) if total_cases > 0 else 0
 
     monthly_msg = (
-        f"📊 **የAdama District የወሩ ማጠቃለያ ሪፖርት** 📊\n\n"
+        f"📊 **የAdama የወሩ ማጠቃለያ ሪፖርት** 📊\n\n"
         f"📁 **ጠቅላላ የኬዞች ብዛት:** {total_cases}\n"
         f"✅ **የተጠናቀቁ (Completed):** {completed_cases}\n"
         f"⏳ **በመጠባበቅ ላይ (Pending):** {pending_cases}\n"
@@ -275,7 +281,7 @@ def main():
         logging.error("TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # ሀ. የጤና መፈተሻ ሰርቨሩን ማስጀመር (Render እንዳይዘጋው)
+    # ሀ. የጤና መፈተሻ ሰርቨሩን ማስጀመር
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
