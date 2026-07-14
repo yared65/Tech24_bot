@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import threading
-import urllib.parse
+import urllib.parse  # ይህ እንዳይረሳ እዚህ ጋር በትክክል ተቀምጧል!
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 from telegram import Update
@@ -41,9 +41,10 @@ async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
         return [], "Error: EMAIL or PASSWORD environment variables are not set on Render!"
 
-    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
-    login_url = 'https://api.tech24et.com/api/login'
-    api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
+    # የኤፒአይ ሊንኮችን ወደ ዋናው tech24et.com ዶሜን አስተካክለናል (DNS ስህተትን ለመፍታት)
+    csrf_url = 'https://tech24et.com/sanctum/csrf-cookie'
+    login_url = 'https://tech24et.com/api/login'
+    api_url = 'https://tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -61,7 +62,7 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as session:
         try:
-            # ሀ. CSRF Cookie ማግኘት
+            # ሀ. CSRF Cookie ለማግኘት ጥሪ እናደርጋለን
             csrf_response = await session.get(csrf_url)
             logging.info(f"CSRF cookie status: {csrf_response.status_code}")
 
@@ -108,7 +109,6 @@ async def scrape_website_cases():
 
             scraped_cases = []
             for item in cases_list:
-                # ማንኛውም ባዶ (None) የሆነን አባል መዝለል
                 if not item or not isinstance(item, dict):
                     continue
                 
@@ -164,7 +164,7 @@ async def scrape_website_cases():
 
         except httpx.RequestError as req_err:
             logging.error(f"Network error: {req_err}")
-            return [], "Error: Network connection timeout with API."
+            return [], f"Error: Network connection problem ({str(req_err)})"
         except Exception as e:
             logging.error(f"Parsing error: {e}")
             return [], f"Error: {str(e)}"
@@ -256,7 +256,6 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     completed_cases = len([c for c in cases if c['status'] == "Completed"])
     pending_cases = total_cases - completed_cases
     
-    # የስኬት ፐርሰንት ማስላት
     success_rate = (completed_cases / total_cases * 100) if total_cases > 0 else 0
 
     monthly_msg = (
@@ -283,7 +282,7 @@ def main():
     # ለ. የቴሌግራም ቦት መተግበሪያን መፍጠር
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # ሐ. ትዕዛዞችን ማገናኘት (Handlers) - /monthly እዚህ ጋር በትክክል ተጨምሯል!
+    # ሐ. ትዕዛዞችን ማገናኘት (Handlers)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("pending", pending_command))
