@@ -14,7 +14,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from datetime import datetime
 import re
-# Excel ለመስራት የሚጠቅም
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -33,9 +32,7 @@ async def scrape_website_cases():
     login_data = {'email': EMAIL, 'password': PASSWORD, 'submit': 'Login'}
     async with httpx.AsyncClient(follow_redirects=True) as session:
         try:
-            # Login ማድረግ
             await session.post('https://tech24et.com/client/index.php', data=login_data)
-            # የኬዞችን ገጽ መውሰድ
             response = await session.get('https://tech24et.com/client/cases.php')
             
             if response.status_code == 200:
@@ -55,11 +52,9 @@ async def scrape_website_cases():
                         branch = cols[4].text.strip()
                         issue = cols[5].text.strip()
                         
-                        # ተጨማሪ መረጃዎች (ካሉ)
                         time_val = cols[6].text.strip() if len(cols) > 6 else "1h"
                         status = cols[7].text.strip() if len(cols) > 7 else "Pending"
                         
-                        # በጽሁፉ ውስጥ ቀን መኖሩን መፈለግ (ለሳምንታዊ ሪፖርት)
                         date_str = datetime.now().strftime("%d/%m/%Y")
                         for col in cols:
                             text = col.text.strip()
@@ -116,7 +111,6 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የፔንዲንግ መረጃዎችን ከዌብሳይቱ ላይ በመፈለግ ላይ...")
     cases = await scrape_website_cases()
     
-    # ፔንዲንግ እና የአዳማ የሆኑትን መለየት
     adama_pending = [c for c in cases if "Adama District" in c['district'] and c['status'].lower() != "completed"]
     
     if not adama_pending:
@@ -125,7 +119,6 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     keyboard = []
     for c in adama_pending:
-        # Button ፎርማት: 15759 | Awash | Batu | 1h
         btn_text = f"{c['case_id']} | {c['bank']} | {c['branch']} | {c['time_val']}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_{c['case_id']}")])
         
@@ -171,17 +164,14 @@ async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📍 ለAdama District የተመዘገበ ምንም ኬዝ አልተገኘም።")
         return
         
-    # በምስል 3 (1784050574342.jpeg) መሰረት ፎርማት ማድረግ
     report_lines = [".       Weekly report/yared Girma/\n"]
     
     bank_counts = {}
     for c in adama_cases:
-        # ፎርማት: ® 15/06/2025 Registered Dabe Soloke Branch Awash Bank(SLLS belt problem )
         line = f"® {c['date']} Registered {c['branch']} Branch {c['bank']}({c['issue']} )"
         report_lines.append(line)
-        report_lines.append("") # ክፍት መስመር
+        report_lines.append("")
         
-        # የባንክ ብዛት ለመቁጠር
         bank_counts[c['bank']] = bank_counts.get(c['bank'], 0) + 1
         
     report_lines.append("\n         Generally\n")
@@ -189,7 +179,7 @@ async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report_lines.append(f"{bank_name} Registered")
         report_lines.append(f"   resolved - {count}")
         
-    report_lines.append(".") # የፍጻሜ ነጥብ
+    report_lines.append(".")
     
     await update.message.reply_text("\n".join(report_lines))
 
@@ -203,16 +193,13 @@ async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📍 ለAdama District ምንም ኬዝ አልተገኘም።")
         return
         
-    # Excel መፍጠር
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Monthly Cases Report"
     
-    # ራስጌዎች (Headers)
     headers = ["Date", "Case ID", "Bank", "Branch", "Issue", "District", "Status"]
     ws.append(headers)
     
-    # የራስጌ ዲዛይን ማስተካከያ (ሰማያዊ ዳራ ከነጭ ጽሁፍ ጋር)
     header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center")
@@ -223,7 +210,6 @@ async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cell.fill = header_fill
         cell.alignment = header_align
         
-    # መረጃዎችን ማስገባት
     for c in adama_cases:
         ws.append([
             c['date'],
@@ -235,13 +221,11 @@ async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c['status']
         ])
         
-    # የዓምዶችን ስፋት በራስ-ሰር ማስተካከል
     for col in ws.columns:
         max_len = max(len(str(cell.value or '')) for cell in col)
         col_letter = openpyxl.utils.get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
         
-    # ኤክሴሉን በሜሞሪ ውስጥ መያዝ
     excel_file = io.BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
@@ -314,17 +298,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         case_id = data.split("_")[1]
         await query.edit_message_text(f"⏳ ኬዝ ID {case_id}-ን ከዌብሳይቱ ላይ ለመዝጋት እየሞከርኩ ነው...")
         
-        # ዌብሳይቱ ላይ ኬዝ ለመዝጋት የሚላክ POST ሪኩዌስት
         login_data = {'email': EMAIL, 'password': PASSWORD, 'submit': 'Login'}
         async with httpx.AsyncClient(follow_redirects=True) as session:
             try:
                 await session.post('https://tech24et.com/client/index.php', data=login_data)
                 
-                # ዌብሳይቱ ኬዝ ለመጨረስ የሚጠቀምበት ፎርማት (እንደ ዌብሳይቱ ዲዛይን ሊቀየር ይችላል)
                 terminate_url = 'https://tech24et.com/client/cases.php'
                 payload = {
                     'case_id': case_id,
-                    'action': 'complete',      # ወይም 'terminate'
+                    'action': 'complete',
                     'status': 'Completed',
                     'submit': 'Update'
                 }
@@ -378,41 +360,6 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     
     print("Bot is running with custom menus...")
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
-
-        job.schedule_removal()
-    
-    context.job_queue.run_repeating(check_website_job, interval=900, first=5, chat_id=chat_id, name=str(chat_id))
-    await update.message.reply_text("✅ የAdama District ክትትል ተጀምሯል።")
-
-
-# --- Render Timed out እንዳይል የሚከላከል Dummy Web Server ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-# --------------------------------------------------------
-
-def main():
-    # Health Web Serverን ከጀርባ በThread ማስጀመር (Render እንዳይዘጋው)
-    threading.Thread(target=run_health_server, daemon=True).start()
-    
-    if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN is missing!")
-        return
-        
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    print("Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
