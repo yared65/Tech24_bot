@@ -17,17 +17,15 @@ import re
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# የቦት ቶከን እና የዌብሳይት ዝርዝሮች ከRender Environment Variables ይነበባሉ
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 EMAIL = os.getenv('EMAIL')
 PASSWORD = os.getenv('PASSWORD')
 
-# ድግግሞሽን ለመከላከል የተላኩ ኬዞች ማከማቻ
 sent_cases = set()
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- የዌብሳይት መረጃዎችን በአንድ ላይ ሰብስቦ የሚያመጣ Helper Function ---
+# --- የዌብሳይት መረጃዎችን በአይነትና በራስጌ (Header) ለይቶ የሚያመጣ ብልጥ ተግባር ---
 async def scrape_website_cases():
     login_data = {'email': EMAIL, 'password': PASSWORD, 'submit': 'Login'}
     async with httpx.AsyncClient(follow_redirects=True) as session:
@@ -41,27 +39,64 @@ async def scrape_website_cases():
                 if not table:
                     return []
                 
+                # ዓምዶችን (Columns) በስማቸው በራስ-ሰር መለየት
+                headers = []
+                thead = table.find('thead')
+                if thead:
+                    headers = [th.text.strip().lower() for th in thead.find_all('th')]
+                else:
+                    first_row = table.find('tr')
+                    if first_row:
+                        headers = [th.text.strip().lower() for th in first_row.find_all(['th', 'td'])]
+                
+                # ነባሪ ዓምዶች (Fallback Defaults)
+                idx_case_id = 1
+                idx_bank = 2
+                idx_district = 3
+                idx_branch = 4
+                idx_issue = 5
+                idx_status = -1
+                
+                for i, h in enumerate(headers):
+                    if "case id" in h:
+                        idx_case_id = i
+                    elif "bank" in h:
+                        idx_bank = i
+                    elif "district" in h:
+                        idx_district = i
+                    elif "branch" in h:
+                        idx_branch = i
+                    elif "case type" in h or "issue" in h:
+                        idx_issue = i
+                    elif "status" in h:
+                        idx_status = i
+
                 scraped_cases = []
                 rows = table.find_all('tr')[1:]
                 for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) > 5:
-                        case_id = cols[1].text.strip()
-                        bank = cols[2].text.strip()
-                        district = cols[3].text.strip()
-                        branch = cols[4].text.strip()
-                        issue = cols[5].text.strip()
+                    if len(cols) > max(idx_case_id, idx_bank, idx_district, idx_branch, idx_issue):
+                        case_id = cols[idx_case_id].text.strip()
+                        bank = cols[idx_bank].text.strip()
+                        district = cols[idx_district].text.strip()
+                        branch = cols[idx_branch].text.strip()
+                        issue = cols[idx_issue].text.strip()
                         
-                        time_val = cols[6].text.strip() if len(cols) > 6 else "1h"
-                        status = cols[7].text.strip() if len(cols) > 7 else "Pending"
+                        # የሁኔታ መለያ (Status Detector)
+                        status = "Pending"
+                        if idx_status != -1 and idx_status < len(cols):
+                            status = cols[idx_status].text.strip()
+                        else:
+                            row_text_lower = row.text.lower()
+                            if "completed" in row_text_lower:
+                                status = "Completed"
                         
+                        time_val = "1h"
                         date_str = datetime.now().strftime("%d/%m/%Y")
-                        for col in cols:
-                            text = col.text.strip()
-                            match = re.search(r'\d{2}/\d{2}/\d{4}', text)
-                            if match:
-                                date_str = match.group(0)
-                                break
+                        row_text = row.text.strip()
+                        match = re.search(r'\d{2}/\d{2}/\d{4}', row_text)
+                        if match:
+                            date_str = match.group(0)
                                 
                         scraped_cases.append({
                             'case_id': case_id,
@@ -79,7 +114,7 @@ async def scrape_website_cases():
             return []
     return []
 
-# --- 1. /start (የAdama District ክትትል ማስጀመሪያ) ---
+# --- 1. /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     for job in context.job_queue.get_jobs_by_name(str(chat_id)):
@@ -88,13 +123,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.job_queue.run_repeating(check_website_job, interval=900, first=5, chat_id=chat_id, name=str(chat_id))
     await update.message.reply_text("✅ የAdama District ክትትል ተጀምሯል።")
 
-# በየ15 ደቂቃው ራሱ የሚሰራው ጆብ
+# በየ15 ደቂቃው ራሱ የሚሰራው ክትትል
 async def check_website_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     cases = await scrape_website_cases()
     
     for c in cases:
-        if "Adama District" in c['district'] and c['case_id'] not in sent_cases:
+        # "adama" የሚለውን በዲስትሪክት ውስጥ መፈለግ
+        if "adama" in c['district'].lower() and c['case_id'] not in sent_cases:
             message = (
                 f"🔔 **ATM Incident Notification**\n\n"
                 f"📄 **ID:** {c['case_id']}\n"
@@ -111,7 +147,7 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የፔንዲንግ መረጃዎችን ከዌብሳይቱ ላይ በመፈለግ ላይ...")
     cases = await scrape_website_cases()
     
-    adama_pending = [c for c in cases if "Adama District" in c['district'] and c['status'].lower() != "completed"]
+    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
     
     if not adama_pending:
         await update.message.reply_text("📭 ለAdama District ምንም ፔንዲንግ (Pending) ኬዝ አልተገኘም።")
@@ -131,11 +167,11 @@ async def pending_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# --- 3. /terminate (Completed case - መዝጊያ) ---
+# --- 3. /terminate (Completed case) ---
 async def terminate_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ለመዝጋት የሚሆኑ ኬዞችን በመፈለግ ላይ...")
     cases = await scrape_website_cases()
-    adama_pending = [c for c in cases if "Adama District" in c['district'] and c['status'].lower() != "completed"]
+    adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
     
     if not adama_pending:
         await update.message.reply_text("📭 ለመዝጋት (Terminate ለማድረግ) የሚሆን ፔንዲንግ ኬዝ አልተገኘም።")
@@ -158,7 +194,7 @@ async def terminate_cases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የሳምንት ሪፖርት እየተዘጋጀ ነው...")
     cases = await scrape_website_cases()
-    adama_cases = [c for c in cases if "Adama District" in c['district']]
+    adama_cases = [c for c in cases if "adama" in c['district'].lower()]
     
     if not adama_cases:
         await update.message.reply_text("📍 ለAdama District የተመዘገበ ምንም ኬዝ አልተገኘም።")
@@ -183,11 +219,11 @@ async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("\n".join(report_lines))
 
-# --- 5. /monthly (monthly Report - Excel ሪፖርት መላኪያ) ---
+# --- 5. /monthly (monthly Report - Excel ሪፖርት) ---
 async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 የ 1 ወር የ Excel ሪፖርት እየተዘጋጀ ነው...")
     cases = await scrape_website_cases()
-    adama_cases = [c for c in cases if "Adama District" in c['district']]
+    adama_cases = [c for c in cases if "adama" in c['district'].lower()]
     
     if not adama_cases:
         await update.message.reply_text("📍 ለAdama District ምንም ኬዝ አልተገኘም።")
@@ -237,7 +273,7 @@ async def monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption="📊 የAdama District ወርሃዊ የኤክሴል ሪፖርት ተዘጋጅቷል።"
     )
 
-# --- የባተን ክሊኮችን የሚያስተናግድ Callback Handler ---
+# --- Button Callback Handler ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -276,7 +312,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data == "back_to_pending":
         cases = await scrape_website_cases()
-        adama_pending = [c for c in cases if "Adama District" in c['district'] and c['status'].lower() != "completed"]
+        adama_pending = [c for c in cases if "adama" in c['district'].lower() and c['status'].lower() != "completed"]
         
         if not adama_pending:
             await query.edit_message_text("📭 ለAdama District ምንም ፔንዲንግ ኬዝ አልተገኘም።")
@@ -320,7 +356,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logging.error(f"Error terminating case {case_id}: {e}")
                 await query.edit_message_text(f"❌ Error: ኬዙን በዌብሳይቱ ላይ መዝጋት አልተቻለም።")
 
-# --- Render Timed out እንዳይል የሚከላከል Dummy Web Server ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -332,7 +367,6 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# ቦቱ ሲጀምር የቴሌግራም ሜኑዎችን (Commands) ራሱ እንዲፈጥር ማድረግ
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Start Bot"),
@@ -351,7 +385,6 @@ def main():
         
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("pending", pending_cases))
     application.add_handler(CommandHandler("terminate", terminate_cases))
