@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 from telegram import Update
@@ -40,10 +41,11 @@ async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
         return [], "Error: EMAIL or PASSWORD environment variables are not set on Render!"
 
+    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
-    # 200 የቅርብ ጊዜ መረጃዎችን እንዲያመጣ ሊሚቱን ከፍ አድርገነዋል
     api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
 
+    # ለሎግኢን የሚያስፈልጉ መሰረታዊ ሄደሮች
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
@@ -60,17 +62,29 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as session:
         try:
-            # ሀ. መጀመሪያ CSRF TOKEN ለማግኘት
-            await session.get('https://api.tech24et.com/sanctum/csrf-cookie')
+            # ሀ. መጀመሪያ CSRF Cookie ለማግኘት ጥሪ እናደርጋለን
+            csrf_response = await session.get(csrf_url)
+            logging.info(f"CSRF cookie status: {csrf_response.status_code}")
 
-            # ለ. ሎግኢን ማድረግ
+            # ለ. ከኩኪው ውስጥ XSRF-TOKEN የሚለውን ፈልገን በሄደር ውስጥ እናስገባለን (ይህ 419 ስህተትን ይፈታል!)
+            xsrf_token = session.cookies.get("XSRF-TOKEN")
+            if xsrf_token:
+                decoded_token = urllib.parse.unquote(xsrf_token)
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_token
+                })
+                logging.info("X-XSRF-TOKEN successfully injected into headers.")
+            else:
+                logging.warning("XSRF-TOKEN cookie not found in the initial request!")
+
+            # ሐ. ሎግኢን ማድረግ
             login_response = await session.post(login_url, json=login_data)
             logging.info(f"API Login status: {login_response.status_code}")
 
             if login_response.status_code not in [200, 201, 204]:
                 return [], f"Login failed! Status: {login_response.status_code}"
 
-            # ሐ. መረጃውን መሳብ
+            # መ. መረጃውን መሳብ
             response = await session.get(api_url)
             logging.info(f"API Fetch status: {response.status_code}")
 
@@ -78,7 +92,6 @@ async def scrape_website_cases():
                 return [], f"Failed to fetch data! Status: {response.status_code}"
 
             data = response.json()
-            # የላራቬልን 'data' ኬይ መፈተሽ
             cases_list = data.get('data', data) if isinstance(data, dict) else data
 
             if not isinstance(cases_list, list):
@@ -88,7 +101,7 @@ async def scrape_website_cases():
             for item in cases_list:
                 case_id = str(item.get('id', ''))
                 
-                # Nested መረጃዎችን በጥንቃቄ መውሰድ
+                # የባንክ፣ ዲስትሪክትና ቅርንጫፍ መረጃዎችን መውሰድ
                 bank_info = item.get('bank')
                 bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
 
@@ -99,12 +112,12 @@ async def scrape_website_cases():
                 branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
 
                 issue = item.get('issue', '')
-                date_str = item.get('created_at', '')[:10] if item.get('created_at') else '' # ቀን ብቻ ለመውሰድ
+                date_str = item.get('created_at', '')[:10] if item.get('created_at') else ''
                 
                 status = item.get('status', 'Pending')
                 status_text = "Completed" if status == "Complete" else "Pending"
 
-                # Adama District መረጃዎችን ብቻ ለይቶ ለማውጣት (የፊደል ስህተት እንዳይኖር በትንንሽ ፊደላት ይፈትሻል)
+                # Adama District መረጃዎችን ብቻ መለየት
                 if "adama" in district.lower():
                     scraped_cases.append({
                         'case_id': case_id,
