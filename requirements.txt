@@ -1,5 +1,6 @@
 requests
 beautifulsoup4
-python-telegram-bot[job-queue]
 httpx
 python-dotenv
+python-telegram-bot[job-queue]>=20.0
+openpyxl
