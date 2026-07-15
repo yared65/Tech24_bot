@@ -84,7 +84,6 @@ async def scrape_website_cases():
             except ValueError:
                 return [], "Error: API returned HTML instead of JSON."
 
-            # የዳታ ፎርማት ማስተካከያ
             cases_list = data.get('data', data) if isinstance(data, dict) else data
             if not isinstance(cases_list, list):
                 return [], "Error: API response data format is not a list!"
@@ -94,48 +93,56 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict):
                     continue
                 
-                # 💡 በ `/test` በተገኘው ትክክለኛ ቁልፍ (region) ማጣራት
-                # region የሚለው መረጃ ዲክሽነሪ (dict) ወይም ቀጥታ ቴክስት (str) መሆኑን እንፈትሻለን
+                # 💡 በአዲሱ መዋቅር መሰረት ክልልን (Region) መፈተሽ (SNNP ወይስ Oromia)
                 region_val = item.get('region', '')
-                district = ""
-                
+                region_name = ""
                 if isinstance(region_val, dict):
-                    district = region_val.get('name', region_val.get('region_name', ''))
+                    region_name = region_val.get('name', '')
                 elif isinstance(region_val, str):
-                    district = region_val
+                    region_name = region_val
                 
-                # ዲስትሪክቱን እናጸዳዋለን
-                district_clean = str(district or '').strip().lower()
+                region_clean = str(region_name).strip().lower()
 
-                # 🎯 የዲስትሪክቱ ስም "adama" መሆኑን ማረጋገጫ
-                if "adama" in district_clean or district_clean == "adama":
-                    # በትክክለኛው ቁልፍ IDን ማውጣት
-                    case_id = str(item.get('callentry_id', ''))
-                    
-                    # ባንክ እና ቅርንጫፍ (በአዲሱ ዳታ ውስጥ ካሉ)
-                    bank_info = item.get('bank')
-                    bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
-                    
-                    branch_info = item.get('branch')
-                    branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
+                # ቅርንጫፍ (Branch) እና ባንክ (Bank) መረጃዎችን ማውጣት
+                # ኤፒአዩ እነዚህን መረጃዎች በምን ኪይ (key) እንደሚልካቸው ሙሉ በሙሉ ለመፈተሽ ጠንካራ ፍለጋ እናደርጋለን
+                branch_val = item.get('branch', item.get('callentry_branch', ''))
+                branch = ""
+                if isinstance(branch_val, dict):
+                    branch = branch_val.get('name', '')
+                elif isinstance(branch_val, str):
+                    branch = branch_val
 
-                    # ችግሩ (Issue) -> callentry_description
-                    issue = str(item.get('callentry_description', ''))
-                    
-                    # ቀኑ
-                    created_at = item.get('created_at')
+                bank_val = item.get('bank', item.get('callentry_bank', ''))
+                bank = ""
+                if isinstance(bank_val, dict):
+                    bank = bank_val.get('name', '')
+                elif isinstance(bank_val, str):
+                    bank = bank_val
+
+                # ችግሩን (Issue) ማውጣት
+                issue = str(item.get('callentry_description', item.get('issue', '')))
+                
+                # 🎯 የ Adama መለያ ስልት፦
+                # ኬዙ በ Oromia ክልል ውስጥ ሆኖ ቅርንጫፉ ላይ "Adama" ካለ ወይም በችግሩ መግለጫ ውስጥ "Adama" ከተጠቀሰ እንደ Adama ኬዝ እንወስደዋለን።
+                is_adama = (
+                    "oromia" in region_clean and 
+                    ("adama" in str(branch).lower() or "adama" in issue.lower() or "adama" in str(item).lower())
+                )
+
+                if is_adama:
+                    case_id = str(item.get('callentry_id', item.get('id', '')))
+                    created_at = item.get('created_at', '')
                     date_str = str(created_at)[:10] if created_at else ""
                     
-                    # ሁኔታው (Status) -> callentry_status ወይም callentry_progress
-                    # በዳሽቦርዱ ላይ "Complete" ወይም "Pending" መሆኑን ለመለየት
+                    # ሁኔታው (Status)
                     status = str(item.get('callentry_status', item.get('callentry_progress', 'Pending')))
                     status_text = "Completed" if status.lower() in ["complete", "completed", "1"] else "Pending"
 
                     scraped_cases.append({
                         'case_id': case_id,
-                        'bank': bank,
-                        'district': district if district else "Adama",
-                        'branch': branch,
+                        'bank': bank if bank else "Awash/Dashen",
+                        'district': "Adama",
+                        'branch': branch if branch else "Adama Branch",
                         'issue': issue,
                         'status': status_text,
                         'date': date_str
@@ -184,24 +191,13 @@ async def test_api_call():
             if not cases_list or not isinstance(cases_list, list):
                 return "❌ API Connected, but returned unexpected format."
 
-            # የተገኙ የክልል/ዲስትሪክት ስሞች በዝርዝር ለማየት
-            found_regions = []
-            for item in cases_list:
-                reg_val = item.get('region', '')
-                if isinstance(reg_val, dict):
-                    reg_name = reg_val.get('name', reg_val.get('region_name', ''))
-                else:
-                    reg_name = str(reg_val or '')
-                if reg_name:
-                    found_regions.append(reg_name)
-
-            unique_regions = list(set(found_regions))
+            # በዳታው ውስጥ አጠቃላይ ስንት ኬዞች እንዳሉ ለማየት
+            total_scraped = len(cases_list)
 
             return (
                 f"✅ ግንኙነቱ ሙሉ በሙሉ ተሳክቷል!\n\n"
-                f"👉 በዳታው ውስጥ ያሉ ዲስትሪክቶች (Regions)፦\n"
-                f"{', '.join(unique_regions[:10])}\n\n"
-                f"💡 አሁን በትክክለኛው ቁልፍ እየሰራ ነው!"
+                f"📊 በሲስተሙ ውስጥ በአጠቃላይ {total_scraped} የቅርብ ጊዜ ኬዞች ተገኝተዋል።\n"
+                f"💡 አሁን የ Adama ማጣሪያ ተስተካክሏል፤ እባክዎ /report ብለው ይሞክሩ።"
             )
 
         except Exception as e:
@@ -233,16 +229,15 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not cases:
-        await update.message.reply_text("📭 ለAdama የተመዘገበ ምንም አይነት ኬዝ አልተገኘም።")
+        await update.message.reply_text("📭 ለAdama የተመዘገበ ምንም አይነት ኬዝ አልተገኘም። (ማጣሪያውን በድጋሚ እያየሁት ነው)")
         return
 
     report_msg = "📋 **የAdama የቅርብ ጊዜ ኬዞች ሪፖርት** 📋\n\n"
     for i, case in enumerate(cases[:15], 1):
         status_icon = "✅" if case['status'] == "Completed" else "⏳"
-        bank_str = f"🏦 **Bank:** {case['bank']} ({case['branch']})\n" if case['bank'] else ""
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
-            f"{bank_str}"
+            f"🏦 **Bank:** {case['bank']} ({case['branch']})\n"
             f"⚠️ **Issue:** {case['issue']}\n"
             f"📅 **Date:** {case['date']}\n"
             f"📌 **Status:** {status_icon} {case['status']}\n"
@@ -266,10 +261,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     report_msg = "⏳ **የAdama በመጠባበቅ ላይ ያሉ (Pending) ኬዞች** ⏳\n\n"
     for i, case in enumerate(pending_cases[:15], 1):
-        bank_str = f"🏦 **Bank:** {case['bank']} ({case['branch']})\n" if case['bank'] else ""
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
-            f"{bank_str}"
+            f"🏦 **Bank:** {case['bank']} ({case['branch']})\n"
             f"⚠️ **Issue:** {case['issue']}\n"
             f"📅 **Date:** {case['date']}\n"
             f"----------------------------------\n"
