@@ -151,7 +151,7 @@ def build_case_detail_ui(case):
 
 # 7. ቦት ኮማንዶች
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋👋👋Welcome to Tech24 Adama District Bot👋👋👋\n The Bot is Active Know")
+    await update.message.reply_text("👋👋👋Welcome to Tech24 Adama District Bot👋👋👋\n The Bot is Active Know\n Commands Overview:\n/start  – Initialize your session\n /pending   – View open/unresolved cases\n /Terminate    - Terminate completed case \n/report     – Summary of case  weekly \n /monthly – Report monthly case ")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cases, status_msg = await scrape_website_cases()
