@@ -14,12 +14,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# 2. የአካባቢ ተለዋዋጮችን (Environment Variables) ከRender ማግኘት
+# 2. የአካባቢ ተለዋዋጮችን ከRender ማግኘት
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር (Keep-Alive Health Server)
+# 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -28,7 +28,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Running and Alive!")
         
     def log_message(self, format, *args):
-        return  # ሎጉን እንዳይጨናነቅ ጸጥ ለማድረግ
+        return
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -43,19 +43,18 @@ async def scrape_website_cases():
 
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
-    # አላስፈላጊ ፓራሜትሮችን በማስወገድ ጥያቄውን እናቃልላለን
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
 
-    # የሰርቨሩን ጥበቃ ለማለፍ የተስተካከሉ Headers
+    # የድረገጹን ብሮውዘር ሙሉ በሙሉ ለመምሰል የተዘጋጁ Headers
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Content-Type': 'application/json',
-        'Referer': 'https://tech24et.com/',
-        'Origin': 'https://tech24et.com'
+        'Origin': 'https://tech24et.com',
+        'Referer': 'https://tech24et.com/'
     }
 
-    # በ Render ላይ የተቀመጡትን መለያዎች ከባዶ ቦታዎች (Spaces) እናጸዳለን
     login_data = {
         'email': EMAIL.strip(),
         'password': PASSWORD.strip()
@@ -63,34 +62,38 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # ሀ. CSRF Cookie ማግኘት
-            await session.get(csrf_url)
+            # ሀ. መጀመሪያ CSRF cookie ለማግኘት ጥሪ እናደርጋለን
+            csrf_res = await session.get(csrf_url)
+            logging.info(f"CSRF cookie fetch status: {csrf_res.status_code}")
 
             # ለ. XSRF-TOKEN በሄደር ውስጥ ማካተት
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if xsrf_token:
+                # 💡 ማስተካከያ፡ ቶከኑን በትክክለኛው የላራቬል ፎርማት unquote እናደርጋለን
+                decoded_token = urllib.parse.unquote(xsrf_token)
                 session.headers.update({
-                    'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)
+                    'X-XSRF-TOKEN': decoded_token
                 })
+                logging.info("X-XSRF-TOKEN added to headers.")
 
             # ሐ. ሎግኢን ማድረግ
             login_response = await session.post(login_url, json=login_data)
+            logging.info(f"API Login status: {login_response.status_code}")
+
             if login_response.status_code not in [200, 201, 204]:
                 return [], f"Login failed! Status: {login_response.status_code}"
 
             # መ. መረጃውን መሳብ
             response = await session.get(api_url)
-            if response.status_code != 200:
-                return [], f"API Server returned status {response.status_code} (Internal Error)"
+            logging.info(f"API Fetch status: {response.status_code}")
 
-            # የJSON ፎርማት ስህተትን መከላከል
+            if response.status_code != 200:
+                return [], f"Failed to fetch data! Status: {response.status_code}"
+
             try:
                 data = response.json()
             except ValueError:
-                return [], "Error: API returned HTML/Text instead of JSON."
-
-            if not data:
-                return [], "Error: API returned empty response!"
+                return [], "Error: API returned HTML/text instead of JSON."
 
             cases_list = data.get('data', data) if isinstance(data, dict) else data
             if not isinstance(cases_list, list):
@@ -103,15 +106,15 @@ async def scrape_website_cases():
                 
                 case_id = str(item.get('id', ''))
                 
-                # የባንክ መረጃን በጥንቃቄ መውሰድ
+                # የባንክ መረጃ
                 bank_info = item.get('bank')
                 bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
 
-                # የዲስትሪክት መረጃን በጥንቃቄ መውሰድ
+                # የዲስትሪክት መረጃ
                 district_info = item.get('district')
                 district = district_info.get('name', '') if isinstance(district_info, dict) else str(district_info or '')
 
-                # የቅርንጫፍ መረጃን በጥንቃቄ መውሰድ
+                # የቅርንጫፍ መረጃ
                 branch_info = item.get('branch')
                 branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
 
@@ -121,7 +124,7 @@ async def scrape_website_cases():
                 status = str(item.get('status') or 'Pending')
                 status_text = "Completed" if status == "Complete" else "Pending"
 
-                # 💡 "Adama" የሚለውን ቃል የያዙትን ዲስትሪክቶች ብቻ መለየት
+                # "Adama" የሚለውን ቃል ያካተቱትን መለየት (Case-insensitive check)
                 if "adama" in district.strip().lower():
                     scraped_cases.append({
                         'case_id': case_id,
@@ -140,7 +143,7 @@ async def scrape_website_cases():
             logging.error(f"Error during scraping: {e}")
             return [], f"Error: {str(e)}"
 
-# 5. የኤፒአይ ግንኙነትን በቴሌግራም ቀጥታ ለመፈተሽ የሚረዳ (Debug Function)
+# 5. የሙከራ/ስህተት መፈለጊያ ተግባር (test_api)
 async def test_api_call():
     if not EMAIL or not PASSWORD:
         return "Error: EMAIL or PASSWORD environment variables are not set on Render!"
@@ -150,27 +153,48 @@ async def test_api_call():
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
 
     headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Content-Type': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Origin': 'https://tech24et.com',
+        'Referer': 'https://tech24et.com/'
     }
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # 1. CSRF
-            await session.get(csrf_url)
+            # 1. CSRF Cookie
+            csrf_res = await session.get(csrf_url)
+            csrf_status = csrf_res.status_code
+
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if xsrf_token:
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+                decoded_token = urllib.parse.unquote(xsrf_token)
+                session.headers.update({'X-XSRF-TOKEN': decoded_token})
 
             # 2. Login
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
-            if login_res.status_code not in [200, 201, 204]:
-                return f"❌ Login Failed! Status Code: {login_res.status_code}\nResponse: {login_res.text[:150]}"
+            login_status = login_res.status_code
+
+            if login_status not in [200, 201, 204]:
+                # በዝርዝር የሰርቨሩን ምላሽ ለማየት
+                return (
+                    f"❌ Login Failed!\n"
+                    f"🔹 CSRF Status: {csrf_status}\n"
+                    f"🔹 Login Status: {login_status}\n"
+                    f"🔹 Response Message: {login_res.text[:200]}"
+                )
 
             # 3. Fetch Data
             api_res = await session.get(api_url)
-            if api_res.status_code != 200:
-                return f"❌ Fetch Failed! Status Code: {api_res.status_code}\nResponse: {api_res.text[:150]}"
+            api_status = api_res.status_code
+
+            if api_status != 200:
+                return (
+                    f"❌ Fetch Failed!\n"
+                    f"🔹 Login was OK!\n"
+                    f"🔹 Fetch Status Code: {api_status}\n"
+                    f"🔹 Response: {api_res.text[:200]}"
+                )
 
             data = api_res.json()
             cases_list = data.get('data', data) if isinstance(data, dict) else data
@@ -178,7 +202,6 @@ async def test_api_call():
             if not cases_list or not isinstance(cases_list, list):
                 return f"❌ API Connected, but format unexpected:\n{str(data)[:200]}"
 
-            # በሲስተሙ ውስጥ ያሉ የመጀመሪያዎቹን 5 ዲስትሪክቶች መለየት
             found_districts = []
             for item in cases_list[:15]:
                 dist_info = item.get('district')
@@ -189,18 +212,16 @@ async def test_api_call():
             unique_districts = list(set(found_districts))
 
             return (
-                f"✅ የኤፒአይ ግንኙነት ስኬታማ ነው!\n\n"
+                f"✅ ግንኙነቱ ሙሉ በሙሉ ተሳክቷል!\n\n"
                 f"📊 በሲስተሙ ውስጥ የተገኙ ዲስትሪክቶች፦\n"
                 f"👉 {', '.join(unique_districts[:5])}\n\n"
-                f"💡 እባክህ እነዚህ ስሞች ውስጥ 'Adama' በትክክል መኖሩን አረጋግጥ።"
+                f"💡 ሁሉም ነገር መስራት ጀምሯል።"
             )
 
         except Exception as e:
             return f"❌ የቴክኒክ ስህተት አጋጥሟል፦\n{str(e)}"
 
-# 6. የቴሌግራም ቦት ትዕዛዞች (Bot Commands Handlers)
-
-# /start ትዕዛዝ
+# 6. የቴሌግራም ቦት ትዕዛዞች
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 እንኳን ወደ Tech24 Adama መከታተያ ቦት በሰላም መጡ!\n\n"
@@ -212,16 +233,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text)
 
-# /test ትዕዛዝ
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 የኤፒአይ ግንኙነትን እና መረጃዎችን እየመረመርኩ ነው...")
     test_result = await test_api_call()
     await update.message.reply_text(test_result)
 
-# /report ትዕዛዝ
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ የAdama መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፣ እባክዎ ትንሽ ይጠብቁ...")
-    
     cases, status_msg = await scrape_website_cases()
     
     if status_msg != "OK":
@@ -243,13 +261,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 **Status:** {status_icon} {case['status']}\n"
             f"----------------------------------\n"
         )
-    
     await update.message.reply_text(report_msg, parse_mode="Markdown")
 
-# /pending ትዕዛዝ
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ያልተጠናቀቁ የAdama ኬዞችን በመፈለግ ላይ...")
-    
     cases, status_msg = await scrape_website_cases()
     
     if status_msg != "OK":
@@ -271,13 +286,10 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 **Date:** {case['date']}\n"
             f"----------------------------------\n"
         )
-    
     await update.message.reply_text(report_msg, parse_mode="Markdown")
 
-# /monthly ትዕዛዝ (የወሩ ማጠቃለያ)
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 የAdama የወሩን ማጠቃለያ ሪፖርት በማዘጋጀት ላይ...")
-    
+    await update.message.reply_text("📊 የAdama የወሩ ማጠቃለያ ሪፖርት በማዘጋጀት ላይ...")
     cases, status_msg = await scrape_website_cases()
     
     if status_msg != "OK":
@@ -291,7 +303,6 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_cases = len(cases)
     completed_cases = len([c for c in cases if c['status'] == "Completed"])
     pending_cases = total_cases - completed_cases
-    
     success_rate = (completed_cases / total_cases * 100) if total_cases > 0 else 0
 
     monthly_msg = (
@@ -302,30 +313,25 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 **የአፈጻጸም ምጣኔ (Success Rate):** {success_rate:.1f}%\n\n"
         f"🎈 ሰላም ስራ!"
     )
-    
     await update.message.reply_text(monthly_msg, parse_mode="Markdown")
 
-# 7. ዋናው ማስነሻ (Main Function)
+# 7. ዋናው ማስነሻ
 def main():
     if not BOT_TOKEN:
         logging.error("TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # ሀ. የጤና መፈተሻ ሰርቨሩን ማስጀመር (Render እንዳይዘጋው)
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
-    # ለ. የቴሌግራም ቦት መተግበሪያን መፍጠር
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # ሐ. ትዕዛዞችን ማገናኘት (Handlers)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
 
-    # መ. ቦቱን ስራ ማስጀመር
     logging.info("Bot is starting polling...")
     application.run_polling()
 
