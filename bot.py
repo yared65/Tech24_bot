@@ -1,3 +1,4 @@
+
 import os
 import logging
 import asyncio
@@ -7,7 +8,7 @@ import datetime
 from io import BytesIO
 from flask import Flask
 import httpx
-import openpyxl  # Excel ፋይል ለመፍጠር
+import openpyxl
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -22,18 +23,22 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 3. Flask Health Check Server
+# 3. Flask Server
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 @app.route('/')
 def home():
-    return "Bot is Running!", 200
+    # UptimeRobot ጥሪ ሲያደርግ ይህንን መልስ ያገኛል
+    return "OK", 200
 
 def run_health_server():
+    # Render የሚሰጠውን ፖርት በትክክል መያዙን እናረጋግጣለን
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    logging.info(f"Starting Flask server on port {port}...")
+    # use_reloader=False እና threaded=True መደረጉ በ thread ውስጥ እንዳይጋጭ ያደርገዋል
+    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 def extract_field(item, keyword):
     if not isinstance(item, dict): return ""
@@ -103,10 +108,7 @@ async def scrape_website_cases():
 
 # 5. ዳሽቦርድ ላይ ኬዝን Terminate (መዝጊያ) ተግባር
 async def terminate_case_on_dashboard(case_id):
-    # ⚠️ ማሳሰቢያ፦ ይህ ሊንክ የዳሽቦርድህ ትክክለኛው Case መዝጊያ API ሊንክ መሆን አለበት። 
-    # አብዛኛውን ጊዜ ከታች ባለው ቅርፅ (format) ነው የሚሰራው።
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
-    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'Accept': 'application/json',
@@ -115,19 +117,16 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
         try:
-            # ሎግኢን ማካሄድ
             await session.get('https://api.tech24et.com/sanctum/csrf-cookie')
             xsrf = session.cookies.get("XSRF-TOKEN")
             if xsrf: session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf)})
             await session.post('https://api.tech24et.com/api/login', json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
-            
-            # ኬዙን መዝጋት (PUT ወይም POST እንደ ሲስተሙ ይወሰናል)
             res = await session.post(terminate_url, json={'status': 'completed'})
             return res.status_code in [200, 201, 204]
         except:
             return False
 
-# 6. የኬዝ ዝርዝር እና በተኖችን ማዘጋጃ (UI Builder)
+# 6. UI Builder
 def build_case_detail_ui(case):
     text = (
         f"Case ID: {case['case_id']}\n"
@@ -160,7 +159,6 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pending_cases = [c for c in cases if c['status'] == "Pending"]
 
-    # ምንም ኬዝ ከሌለ (ልክ እንደ 4ኛው ፎቶ)
     if not pending_cases:
         keyboard = [[InlineKeyboardButton("🗂 Check in dashboard ↗️", url="https://tech24et.com")]]
         await update.message.reply_text(
@@ -169,12 +167,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 1 ኬዝ ብቻ ካለ ወዲያውኑ ሙሉ ዝርዝሩንና በተኖቹን ማሳየት
     if len(pending_cases) == 1:
         text, markup = build_case_detail_ui(pending_cases[0])
         await update.message.reply_text(text, reply_markup=markup)
-
-    # ከ 1 በላይ ከሆነ ዝርዝሩን (List) ማሳየት (እንደ 2ኛው ፎቶ)
     else:
         keyboard = []
         for case in pending_cases:
@@ -188,7 +183,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# 8. የኤክሴል ሪፖርት (Export/Monthly - እንደ 4ኛው ፎቶ)
+# 8. Excel Export
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text("⏳ Generating Excel Report...")
     cases, status = await scrape_website_cases()
@@ -196,25 +191,21 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cases:
         return await processing_msg.edit_text("❌ No data available to export.")
 
-    # Excel ማዘጋጀት
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "ATM Cases Report"
     
-    # ሄደሮች (Headers)
     headers = ["Case ID", "Bank", "Branch", "Terminal", "Issue", "Status", "Technician", "Reported At", "Comment"]
     ws.append(headers)
     
-    # ዳታ ማስገባት
     for c in cases:
         ws.append([c['case_id'], c['bank'], c['branch'], c['terminal'], c['issue'], c['status'], c['technician'], c['date'], c['comment']])
 
-    # ወደ ቨርቹዋል ፋይል (BytesIO) ማስቀመጥ
     excel_file = BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
     
-    current_month = datetime.datetime.now().strftime("%B %Y") # e.g. "July 2026"
+    current_month = datetime.datetime.now().strftime("%B %Y")
     filename = f"case-report-2026-{datetime.datetime.now().strftime('%B').lower()}.xlsx"
     
     caption = (
@@ -226,7 +217,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await processing_msg.delete()
     await update.message.reply_document(document=excel_file, filename=filename, caption=caption)
 
-# 9. በተን ሲነካ (Callback Queries)
+# 9. Callback Buttons
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -236,7 +227,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # ዝርዝር ለማየት ሲጠየቅ (show_ID)
     if data.startswith("show_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
@@ -247,7 +237,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await query.edit_message_text("❌ Case not found.")
 
-    # Refresh ሲነካ
     elif data.startswith("refresh_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
@@ -258,9 +247,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await query.edit_message_text(text, reply_markup=markup)
                 await query.answer("🔄 Data Refreshed!")
             except:
-                pass # ዳታው ካልተቀየረ Telegram error እንዳያመጣ
+                pass
 
-    # Terminate ሲነካ
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
         await query.answer("⏳ Terminating Case...", show_alert=True)
@@ -275,13 +263,15 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
 def main():
+    # Flaskን በ Thread ማስነሳት
     threading.Thread(target=run_health_server, daemon=True).start()
+    
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("export", export_command))
-    application.add_handler(CommandHandler("monthly", export_command)) # ለሁለቱም ይሰራል
+    application.add_handler(CommandHandler("monthly", export_command))
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
     logging.info("Bot is starting...")
