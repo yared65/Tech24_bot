@@ -3,7 +3,8 @@ import logging
 import asyncio
 import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+# Removed BaseHTTPRequestHandler and HTTPServer
+from flask import Flask  # Added Flask
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -19,22 +20,22 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር (Keep-Alive)
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is Running and Alive!")
-        
-    def log_message(self, format, *args):
-        return
+# 3. Flask Health Check Server for Render & UptimeRobot
+app = Flask(__name__)
+
+# Suppress Flask's default development server logging to keep terminal clean
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+@app.route('/')
+def home():
+    return "Bot is Running and Alive!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logging.info(f"Health check server started on port {port}")
-    server.serve_forever()
+    logging.info(f"Health check Flask server starting on port {port}...")
+    # Run Flask on all interfaces (0.0.0.0)
+    app.run(host="0.0.0.0", port=port)
 
 # 💡 ከዳታው ውስጥ ተስማሚ ቁልፎችን (Keys) በራስ-ሰር የሚፈልግ ብልህ ተግባር
 def extract_field(item, keyword):
@@ -301,7 +302,7 @@ def main():
         logging.error("TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # የጤና መፈተሻ ሰርቨር ማስጀመር
+    # የጤና መፈተሻ Flask ሰርቨር በጀርባ (daemon thread) ማስጀመር
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
