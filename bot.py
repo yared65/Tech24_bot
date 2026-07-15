@@ -8,18 +8,18 @@ import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# 1. ሎጊንግ ማስተካከያ (Logging Setup)
+# 1. ሎጊንግ ማስተካከያ (Logging)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# 2. የአካባቢ ተለዋዋጮችን ከRender ማግኘት
+# 2. የአካባቢ ተለዋዋጮች ከ Render
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር
+# 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር (Keep-Alive)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -36,7 +36,7 @@ def run_health_server():
     logging.info(f"Health check server started on port {port}")
     server.serve_forever()
 
-# 4. ከዌብሳይቱ API መረጃ የሚስበው ዋናው ተግባር (API Scraper)
+# 4. ከዌብሳይቱ API መረጃ የሚስበው ዋናው ተግባር
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
         return [], "Error: EMAIL or PASSWORD environment variables are not set on Render!"
@@ -45,11 +45,9 @@ async def scrape_website_cases():
     login_url = 'https://api.tech24et.com/api/login'
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
 
-    # የድረገጹን ብሮውዘር ሙሉ በሙሉ ለመምሰል የተዘጋጁ Headers
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
         'Content-Type': 'application/json',
         'Origin': 'https://tech24et.com',
         'Referer': 'https://tech24et.com/'
@@ -62,39 +60,31 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # ሀ. መጀመሪያ CSRF cookie ለማግኘት ጥሪ እናደርጋለን
-            csrf_res = await session.get(csrf_url)
-            logging.info(f"CSRF cookie fetch status: {csrf_res.status_code}")
+            # ሀ. CSRF Cookie ማግኘት
+            await session.get(csrf_url)
 
-            # ለ. XSRF-TOKEN በሄደር ውስጥ ማካተት
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if xsrf_token:
-                # 💡 ማስተካከያ፡ ቶከኑን በትክክለኛው የላራቬል ፎርማት unquote እናደርጋለን
-                decoded_token = urllib.parse.unquote(xsrf_token)
                 session.headers.update({
-                    'X-XSRF-TOKEN': decoded_token
+                    'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)
                 })
-                logging.info("X-XSRF-TOKEN added to headers.")
 
-            # ሐ. ሎግኢን ማድረግ
+            # ለ. ሎግኢን ማካሄድ
             login_response = await session.post(login_url, json=login_data)
-            logging.info(f"API Login status: {login_response.status_code}")
-
             if login_response.status_code not in [200, 201, 204]:
                 return [], f"Login failed! Status: {login_response.status_code}"
 
-            # መ. መረጃውን መሳብ
+            # ሐ. መረጃውን መሳብ
             response = await session.get(api_url)
-            logging.info(f"API Fetch status: {response.status_code}")
-
             if response.status_code != 200:
                 return [], f"Failed to fetch data! Status: {response.status_code}"
 
             try:
                 data = response.json()
             except ValueError:
-                return [], "Error: API returned HTML/text instead of JSON."
+                return [], "Error: API returned HTML instead of JSON."
 
+            # የዳታ ፎርማት ማስተካከያ
             cases_list = data.get('data', data) if isinstance(data, dict) else data
             if not isinstance(cases_list, list):
                 return [], "Error: API response data format is not a list!"
@@ -104,35 +94,52 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict):
                     continue
                 
-                case_id = str(item.get('id', ''))
+                # 💡 ጠንካራ የዲስትሪክት ፍተሻ (Robust District Extraction)
+                # APIው ዲስትሪክቱን በዲክሽነሪም ይላከው ወይም በቀጥታ ቴክስት፣ እዚህ ጋር ሁለቱንም እንፈትሻለን፦
+                district_val = item.get('district', '')
+                district = ""
                 
-                # የባንክ መረጃ
-                bank_info = item.get('bank')
-                bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
+                if isinstance(district_val, dict):
+                    # nested object ከሆነ ስሙን እንወስዳለን
+                    district = district_val.get('name', district_val.get('district_name', ''))
+                elif isinstance(district_val, str):
+                    # ቀጥታ ጽሑፍ ከሆነ ራሱን እንወስዳለን
+                    district = district_val
+                
+                # ዲስትሪክቱን ወደ ስትሪንግ ቀይረን ባዶ ቦታዎችን እናጸዳለን
+                district_clean = str(district or '').strip().lower()
 
-                # የዲስትሪክት መረጃ
-                district_info = item.get('district')
-                district = district_info.get('name', '') if isinstance(district_info, dict) else str(district_info or '')
+                # 🎯 የዲስትሪክቱ ስም "adama" መሆኑን ማረጋገጫ
+                if "adama" in district_clean or district_clean == "adama":
+                    case_id = str(item.get('id', item.get('case_id', '')))
+                    
+                    # የባንክ መረጃ
+                    bank_info = item.get('bank')
+                    bank = bank_info.get('name', '') if isinstance(bank_info, dict) else str(bank_info or '')
 
-                # የቅርንጫፍ መረጃ
-                branch_info = item.get('branch')
-                branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
+                    # የቅርንጫፍ መረጃ
+                    branch_info = item.get('branch')
+                    branch = branch_info.get('name', '') if isinstance(branch_info, dict) else str(branch_info or '')
 
-                issue = str(item.get('issue') or '')
-                created_at = item.get('created_at')
-                date_str = str(created_at)[:10] if created_at else ""
-                status = str(item.get('status') or 'Pending')
-                status_text = "Completed" if status == "Complete" else "Pending"
+                    # ችግሩ (Issue/Case Type)
+                    issue = str(item.get('issue') or item.get('case_type') or '')
+                    
+                    # አስተያየት (Comment)
+                    comment = str(item.get('comment') or '')
 
-                # "Adama" የሚለውን ቃል ያካተቱትን መለየት (Case-insensitive check)
-                if "adama" in district.strip().lower():
+                    created_at = item.get('created_at')
+                    date_str = str(created_at)[:10] if created_at else ""
+                    
+                    status = str(item.get('status') or 'Pending')
+                    status_text = "Completed" if status.lower() in ["complete", "completed"] else "Pending"
+
                     scraped_cases.append({
                         'case_id': case_id,
                         'bank': bank,
-                        'district': district,
+                        'district': district if district else "Adama",
                         'branch': branch,
                         'issue': issue,
-                        'time_val': "1h",
+                        'comment': comment,
                         'status': status_text,
                         'date': date_str
                     })
@@ -140,10 +147,9 @@ async def scrape_website_cases():
             return scraped_cases, "OK"
 
         except Exception as e:
-            logging.error(f"Error during scraping: {e}")
             return [], f"Error: {str(e)}"
 
-# 5. የሙከራ/ስህተት መፈለጊያ ተግባር (test_api)
+# 5. የኤፒአይ ግንኙነትን እና የመጀመሪያዎቹን መረጃዎች መፈተሻ (test_api)
 async def test_api_call():
     if not EMAIL or not PASSWORD:
         return "Error: EMAIL or PASSWORD environment variables are not set on Render!"
@@ -162,50 +168,35 @@ async def test_api_call():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # 1. CSRF Cookie
-            csrf_res = await session.get(csrf_url)
-            csrf_status = csrf_res.status_code
-
+            await session.get(csrf_url)
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if xsrf_token:
-                decoded_token = urllib.parse.unquote(xsrf_token)
-                session.headers.update({'X-XSRF-TOKEN': decoded_token})
+                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
 
-            # 2. Login
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
-            login_status = login_res.status_code
+            if login_res.status_code not in [200, 201, 204]:
+                return f"❌ Login Failed! Status Code: {login_res.status_code}"
 
-            if login_status not in [200, 201, 204]:
-                # በዝርዝር የሰርቨሩን ምላሽ ለማየት
-                return (
-                    f"❌ Login Failed!\n"
-                    f"🔹 CSRF Status: {csrf_status}\n"
-                    f"🔹 Login Status: {login_status}\n"
-                    f"🔹 Response Message: {login_res.text[:200]}"
-                )
-
-            # 3. Fetch Data
             api_res = await session.get(api_url)
-            api_status = api_res.status_code
-
-            if api_status != 200:
-                return (
-                    f"❌ Fetch Failed!\n"
-                    f"🔹 Login was OK!\n"
-                    f"🔹 Fetch Status Code: {api_status}\n"
-                    f"🔹 Response: {api_res.text[:200]}"
-                )
+            if api_res.status_code != 200:
+                return f"❌ Fetch Failed! Status Code: {api_res.status_code}"
 
             data = api_res.json()
             cases_list = data.get('data', data) if isinstance(data, dict) else data
 
             if not cases_list or not isinstance(cases_list, list):
-                return f"❌ API Connected, but format unexpected:\n{str(data)[:200]}"
+                return "❌ API Connected, but returned unexpected format."
 
+            # የተገኙ ዲስትሪክቶችን እና ኪዎችን (keys) ለማየት
+            sample_keys = list(cases_list[0].keys()) if cases_list else []
             found_districts = []
-            for item in cases_list[:15]:
-                dist_info = item.get('district')
-                dist_name = dist_info.get('name', '') if isinstance(dist_info, dict) else str(dist_info or '')
+            
+            for item in cases_list:
+                dist_val = item.get('district', '')
+                if isinstance(dist_val, dict):
+                    dist_name = dist_val.get('name', dist_val.get('district_name', ''))
+                else:
+                    dist_name = str(dist_val or '')
                 if dist_name:
                     found_districts.append(dist_name)
 
@@ -213,8 +204,8 @@ async def test_api_call():
 
             return (
                 f"✅ ግንኙነቱ ሙሉ በሙሉ ተሳክቷል!\n\n"
-                f"📊 በሲስተሙ ውስጥ የተገኙ ዲስትሪክቶች፦\n"
-                f"👉 {', '.join(unique_districts[:5])}\n\n"
+                f"📊 በሲስተሙ ውስጥ የተገኙ ቁልፎች (Keys)፦ {', '.join(sample_keys[:6])}\n"
+                f"👉 በዳታው ውስጥ ያሉ ዲስትሪክቶች፦ {', '.join(unique_districts[:10])}\n\n"
                 f"💡 ሁሉም ነገር መስራት ጀምሯል።"
             )
 
@@ -253,10 +244,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report_msg = "📋 **የAdama የቅርብ ጊዜ ኬዞች ሪፖርት** 📋\n\n"
     for i, case in enumerate(cases[:15], 1):
         status_icon = "✅" if case['status'] == "Completed" else "⏳"
+        comment_str = f"\n💬 **Comment:** {case['comment']}" if case['comment'] else ""
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
             f"🏦 **Bank:** {case['bank']} ({case['branch']})\n"
-            f"⚠️ **Issue:** {case['issue']}\n"
+            f"⚠️ **Issue:** {case['issue']}{comment_str}\n"
             f"📅 **Date:** {case['date']}\n"
             f"📌 **Status:** {status_icon} {case['status']}\n"
             f"----------------------------------\n"
@@ -279,10 +271,11 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     report_msg = "⏳ **የAdama በመጠባበቅ ላይ ያሉ (Pending) ኬዞች** ⏳\n\n"
     for i, case in enumerate(pending_cases[:15], 1):
+        comment_str = f"\n💬 **Comment:** {case['comment']}" if case['comment'] else ""
         report_msg += (
             f"{i}. **ID:** {case['case_id']}\n"
             f"🏦 **Bank:** {case['bank']} ({case['branch']})\n"
-            f"⚠️ **Issue:** {case['issue']}\n"
+            f"⚠️ **Issue:** {case['issue']}{comment_str}\n"
             f"📅 **Date:** {case['date']}\n"
             f"----------------------------------\n"
         )
@@ -321,17 +314,21 @@ def main():
         logging.error("TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
+    # የጤና መፈተሻ ሰርቨር ማስጀመር
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
+    # የቴሌግራም ቦት መተግበሪያን መፍጠር
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # ትዕዛዞችን ማገናኘት (Handlers)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
 
+    # ቦቱን ስራ ማስጀመር
     logging.info("Bot is starting polling...")
     application.run_polling()
 
