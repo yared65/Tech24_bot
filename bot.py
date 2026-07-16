@@ -24,8 +24,8 @@ logging.basicConfig(
 # 2. ENVIRONMENT VARIABLES
 # ==========================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-# በ Render ላይ በ 'MY_COOKIE' ስም የጫንከውን ኩኪ እዚህ ይወስደዋል
-RAW_COOKIE = os.environ.get("MY_COOKIE") 
+EMAIL = os.environ.get("EMAIL")
+PASSWORD = os.environ.get("PASSWORD")
 
 # ==========================================
 # 3. FLASK HEALTH-CHECK SERVER (For Uptime)
@@ -44,7 +44,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 4. UTILITY DATA PARSERS (የተዘበራረቀ ዳታ ማስተካከያ)
+# 4. UTILITY DATA PARSERS
 # ==========================================
 def clean_and_parse_value(val):
     if not val:
@@ -74,26 +74,71 @@ def extract_field(item, field_name):
     return str(parsed_val) if parsed_val is not None else ""
 
 # ==========================================
-# 5. DIRECT COOKIE SCRAPING (ያለ ሎጊን መረጃ መሳቢያ)
+# 5. AUTOMATIC LOGIN & DATA SCRAPING
 # ==========================================
-async def scrape_website_cases():
-    if not RAW_COOKIE:
-        return [], "Error: MY_COOKIE environment variable is missing!"
+async def get_authenticated_headers(session: httpx.AsyncClient):
+    """በራስ-ሰር Login በማድረግ ንቁ Headers/Tokens ያመነጫል"""
+    if not EMAIL or not PASSWORD:
+        logging.error("EMAIL or PASSWORD environment variables are missing!")
+        return None
 
-    # ፎቶው ላይ ያየነውን እውነተኛ የኤፒአይ መሳቢያ ሊንክ
-    api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
+    login_url = "https://api.tech24et.com/api/login"
+    payload = {
+        "email": EMAIL,
+        "password": PASSWORD
+    }
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Cookie': RAW_COOKIE.strip(), # ያወጣነውን ኩኪ እዚህ እንሰጠዋለን
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
+        'Content-Type': 'application/json'
     }
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
+    try:
+        response = await session.post(login_url, json=payload, headers=headers)
+        if response.status_code != 200:
+            logging.error(f"Login Failed! Status code: {response.status_code}")
+            return None
+        
+        data = response.json()
+        
+        # የ API Token መውሰጃ (እንደ ሲስተሙ አወቃቀር)
+        token = data.get("token") or data.get("access_token") or (data.get("data", {}) if isinstance(data.get("data"), dict) else {}).get("token")
+        cookie_header = response.headers.get("set-cookie")
+
+        active_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': 'https://tech24et.com',
+            'Referer': 'https://tech24et.com/'
+        }
+
+        if token:
+            active_headers['Authorization'] = f"Bearer {token}"
+        if cookie_header:
+            active_headers['Cookie'] = cookie_header
+
+        return active_headers
+
+    except Exception as e:
+        logging.error(f"Error during automatic login: {str(e)}")
+        return None
+
+
+async def scrape_website_cases():
+    """በራስ-ሰር Login ካደረገ በኋላ የAdama ኬዞችን ይስባል"""
+    api_url = 'https://api.tech24et.com/api/callentries?limit=200&callstatus=&start_date=&end_date=&active=&bank=&branch=&district='
+    
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, verify=False) as session:
+        headers = await get_authenticated_headers(session)
+        if not headers:
+            return [], "❌ Error: ዌብሳይቱ ላይ Login ማድረግ አልተቻለም! እባክዎ Email እና Password ትክክል መሆናቸውን ያረጋግጡ።"
+
         try:
-            response = await session.get(api_url)
+            response = await session.get(api_url, headers=headers)
+            if response.status_code == 401:
+                return [], "❌ Error 401: Unauthorized! Login ተደርጎም መግባት አልተቻለም።"
+                
             if response.status_code != 200:
                 return [], f"Failed to fetch data! Status: {response.status_code}"
 
@@ -106,7 +151,7 @@ async def scrape_website_cases():
                     continue
                 
                 item_str = str(item).lower()
-                # ለአዳማ ብቻ ማጣሪያ (Strict filter for Adama only)
+                # ለአዳማ ብቻ ማጣሪያ
                 if "adama" in item_str and "adama district" not in item_str:
                     status_raw = clean_and_parse_value(item.get('status') or item.get('progress')) or "Pending"
                     status_text = "Completed" if str(status_raw).lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
@@ -166,7 +211,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cases, status_msg = await scrape_website_cases()
     if status_msg != "OK": 
-        return await update.message.reply_text(f"❌ **Connection Error**: {status_msg}")
+        return await update.message.reply_text(status_msg)
 
     pending_cases = [c for c in cases if c['status'] == "Pending"]
 
