@@ -57,7 +57,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST NESTED JSON PARSING HELPERS
+# 3. ROBUST JSON FIELD EXTRACTORS
 # ==========================================
 def safe_parse_json(val):
     if not val:
@@ -72,28 +72,32 @@ def safe_parse_json(val):
         pass
     return {}
 
-def extract_field(item, keyword):
-    if not item:
+def clean_extracted_value(data, key_hierarchy):
+    """
+    Recursively scans and extracts deep nested key names from raw dictionaries.
+    """
+    if not data:
         return ""
-    if isinstance(item, dict):
-        for k, v in item.items():
-            if keyword.lower() in k.lower():
-                if isinstance(v, dict):
-                    return v.get('name', v.get('title', v.get('bankname', v.get('branchname', str(v)))))
-                return str(v)
-        for fallback in ['name', 'title', 'bank_name', 'branch_name', 'bankname', 'branchname']:
-            if fallback in item:
-                return str(item[fallback])
-        return str(item)
+    
+    parsed_data = safe_parse_json(data) if isinstance(data, str) else data
+    if not isinstance(parsed_data, dict):
+        return str(parsed_data)
 
-    if isinstance(item, str):
-        item_stripped = item.strip()
-        if (item_stripped.startswith('{') and item_stripped.endswith('}')) or (item_stripped.startswith('[') and item_stripped.endswith(']')):
-            parsed = safe_parse_json(item_stripped)
-            if parsed and isinstance(parsed, dict):
-                return extract_field(parsed, keyword)
-        return item_stripped
-    return str(item)
+    # Search list of candidate sub-keys
+    for key in key_hierarchy:
+        if key in parsed_data:
+            val = parsed_data[key]
+            if isinstance(val, dict):
+                return clean_extracted_value(val, key_hierarchy)
+            return str(val)
+            
+    # Fallback to general child object scans
+    for k, v in parsed_data.items():
+        if isinstance(v, dict):
+            res = clean_extracted_value(v, key_hierarchy)
+            if res:
+                return res
+    return ""
 
 def get_relative_time(date_obj):
     now = datetime.now()
@@ -101,26 +105,20 @@ def get_relative_time(date_obj):
     seconds = diff.total_seconds()
     
     if seconds < 0:
-        return "just now", "0m"
+        return "just now", "now"
         
     minutes = int(seconds // 60)
     hours = int(minutes // 60)
     days = int(hours // 24)
     
     if days > 0:
-        long_str = f"about {days} day{'s' if days > 1 else ''} ago"
-        short_str = f"{days}d"
+        return f"about {days} day{'s' if days > 1 else ''} ago", f"{days}d"
     elif hours > 0:
-        long_str = f"about {hours} hour{'s' if hours > 1 else ''} ago"
-        short_str = f"{hours}h"
+        return f"about {hours} hour{'s' if hours > 1 else ''} ago", f"{hours}h"
     elif minutes > 0:
-        long_str = f"about {minutes} minute{'s' if minutes > 1 else ''} ago"
-        short_str = f"{minutes}m"
+        return f"about {minutes} minute{'s' if minutes > 1 else ''} ago", f"{minutes}m"
     else:
-        long_str = "just now"
-        short_str = "now"
-        
-    return long_str, short_str
+        return "just now", "now"
 
 # ==========================================
 # 4. API SCRAPER & TRANSACTION ENGINES
@@ -173,20 +171,43 @@ async def scrape_website_cases():
                 if "adama" in raw_string_dump:
                     case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
                     
-                    bank = extract_field(entry.get('bank'), 'bank') or extract_field(entry, 'bank')
-                    branch = extract_field(entry.get('branch'), 'branch') or extract_field(entry, 'branch')
-                    terminal = extract_field(entry.get('terminal'), 'terminal') or extract_field(entry, 'terminal')
-                    
-                    # Clean issue from raw JSON
-                    raw_issue = entry.get('description') or entry.get('issue') or "N/A"
-                    issue = extract_field(raw_issue, 'issuecatname') or extract_field(raw_issue, 'name') or str(raw_issue)
-                    if not issue or issue.strip() == "{}" or "issuecatid" in issue:
-                        issue = "ATM"
-                    
-                    technician = extract_field(entry.get('technician'), 'name') or extract_field(entry, 'technician')
-                    tech_phone = extract_field(entry.get('technician'), 'phone') or "N/A"
+                    # 1. Bank Name Extraction
+                    bank = clean_extracted_value(entry.get('bank'), ['bank_name', 'bankname', 'name', 'title'])
+                    if not bank:
+                        bank = clean_extracted_value(entry, ['bank_name', 'bankname'])
+                    if not bank or bank.isdigit():
+                        bank = "Awash"
+
+                    # 2. Branch Name Extraction
+                    branch = clean_extracted_value(entry.get('branch'), ['branch_name', 'branchname', 'name', 'title'])
+                    if not branch:
+                        branch = clean_extracted_value(entry, ['branch_name', 'branchname'])
+                    if not branch or branch.isdigit():
+                        branch = "Adama Branch"
+
+                    # 3. Terminal/ATM Name Extraction
+                    terminal = clean_extracted_value(entry.get('terminal'), ['atmterminal_name', 'atmterminal_no', 'terminal', 'name'])
+                    if not terminal:
+                        terminal = clean_extracted_value(entry, ['atmterminal_name', 'atmterminal_no', 'terminal'])
+                    if not terminal or '{' in terminal:
+                        terminal = "ATM_1"
+
+                    # 4. Issue Extraction
+                    raw_issue = entry.get('description') or entry.get('issue') or "ATM"
+                    issue = clean_extracted_value(raw_issue, ['issuesubcat_name', 'issuecat_name', 'name', 'title'])
+                    if not issue or '{' in issue:
+                        issue = "ATM Issue"
+
+                    # 5. Technician Extraction
+                    tech_data = entry.get('technician')
+                    technician = "Not Assigned"
+                    tech_phone = "N/A"
+                    if tech_data and isinstance(tech_data, dict):
+                        if 'callentry_id' not in tech_data:
+                            technician = tech_data.get('name', tech_data.get('username', 'Not Assigned'))
+                            tech_phone = tech_data.get('phone', 'N/A')
+
                     comment = entry.get('comment') or "No comments."
-                    atm_name = entry.get('atm_name') or terminal or "ATM_1"
                     district = "Adama"
                     
                     created_at = entry.get('created_at', entry.get('start_date', ''))
@@ -203,26 +224,41 @@ async def scrape_website_cases():
                             except Exception:
                                 date_obj = datetime.now()
 
-                    # Corrected Robust Status Parsing
-                    status_val = entry.get('status')
-                    if isinstance(status_val, dict):
-                        status_raw = str(status_val.get('name', status_val.get('title', 'Pending'))).lower()
-                    else:
-                        status_raw = str(status_val or entry.get('progress', 'Pending')).lower()
+                    # 6. Status Extraction
+                    status_raw = ""
+                    for k in ['callentry_status', 'callentry_progress', 'status', 'progress']:
+                        val = entry.get(k)
+                        if val:
+                            status_raw = str(val).lower()
+                            break
+                    
+                    if not status_raw:
+                        for parent_key in ['technician', 'description']:
+                            parent_val = entry.get(parent_key)
+                            if isinstance(parent_val, dict):
+                                for k in ['callentry_status', 'callentry_progress', 'status', 'progress']:
+                                    if k in parent_val:
+                                        status_raw = str(parent_val[k]).lower()
+                                        break
+                                if status_raw:
+                                    break
 
-                    status_text = "Completed" if status_raw in ["complete", "completed", "1", "done"] else "On going"
+                    if status_raw in ["complete", "completed", "done", "1"]:
+                        status_text = "Completed"
+                    else:
+                        status_text = "On going"
 
                     scraped_cases.append({
                         'case_id': case_id,
-                        'bank': bank if bank else "Awash Bank",
+                        'bank': bank,
                         'district': district,
-                        'branch': branch if branch else "Adama Branch",
-                        'terminal': terminal if terminal else "ATM",
-                        'atm_name': atm_name,
+                        'branch': branch,
+                        'terminal': terminal,
+                        'atm_name': terminal,
                         'issue': issue,
                         'status': status_text,
                         'comment': comment,
-                        'technician': technician if technician else "Assigned Tech",
+                        'technician': technician,
                         'tech_phone': tech_phone,
                         'date_raw': date_str,
                         'date_obj': date_obj
@@ -271,10 +307,8 @@ async def terminate_case_on_dashboard(case_id):
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
-        logger.warning("NOTIFICATION_CHAT_ID variable is missing! Auto-polling paused.")
         return
 
-    logger.info("Running scheduled 10-minute automated dashboard query...")
     cases, status = await scrape_website_cases()
     if status != "OK":
         return
@@ -295,12 +329,12 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     for case in new_pending_cases:
         notif_text = (
             f"*ATM Incident Notification*\n\n"
-            f"📄 *ID:* {case['case_id']},\n"
-            f"🏦 *Bank:* {case['bank']},\n"
-            f"⚠️ *Issue:* {case['issue']},\n"
-            f"🏢 *Branch:* {case['branch']},\n"
-            f"📍 *District:* {case['district']},\n"
-            f"💬 *Comment:* {case['comment']},\n"
+            f"📄 *ID:* {case['case_id']}\n"
+            f"🏦 *Bank:* {case['bank']}\n"
+            f"⚠️ *Issue:* {case['issue']}\n"
+            f"🏢 *Branch:* {case['branch']}\n"
+            f"📍 *District:* {case['district']}\n"
+            f"💬 *Comment:* {case['comment']}\n"
             f"🕒 *Reported at:* {case['date_raw']}"
         )
         
@@ -316,7 +350,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS (WITH TERMINATE BUTTON IN DETAIL VIEW)
+# 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case['date_obj'])
@@ -332,12 +366,11 @@ def build_case_detail_ui(case):
         f"ATM Name: {case['atm_name']}\n"
         f"Comment: {case['comment']}\n"
         f"Technician: {case['technician']}\n"
-        f"Technician Phone: Phone: {case['tech_phone']}\n"
+        f"Technician Phone: {case['tech_phone']}\n"
         f"Reported At: {case['date_raw']} (East Africa Time)\n"
         f"Relative Time: {relative_long}"
     )
     
-    # "Terminate" button is kept here because it is useful to terminate directly from the card
     keyboard = [
         [InlineKeyboardButton("Terminate", callback_data=f"askterm_{case['case_id']}")],
         [InlineKeyboardButton("Refresh", callback_data=f"refresh_{case['case_id']}")],
@@ -452,8 +485,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
         "💻 *Available Commands Menu:*\n"
         "• /pending - View currently open / unresolved cases\n"
-        "• /report - View weekly formatted summary report\n"
-        "• /monthly - View monthly formatted summary report\n"
+        "• /report - View weekly performance metrics\n"
+        "• /monthly - View monthly performance metrics\n"
         "• /export - Download structured incident Excel spreadsheets"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -471,7 +504,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pending_cases:
         keyboard = [[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/")]]
         return await update.message.reply_text(
-            "✅ All Adama cases are completed! No pending cases found. You can check the dashboard for confirmation.",
+            "✅ All Adama cases are completed! No pending cases found.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -479,35 +512,38 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, kb = build_case_detail_ui(pending_cases[0])
         await update.message.reply_text(text, reply_markup=kb)
     else:
-        text = "The following ATM cases have been reported and are currently pending action. select a case from the list below to view details and proceed with resolution."
+        text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details."
         keyboard = []
         for c in pending_cases:
             _, relative_short = get_relative_time(c['date_obj'])
-            button_lbl = f"{c['case_id']} | {c['bank']} | {c['branch']} | {relative_short}"
+            
+            # STYLED BUTTON NAME: [Time] | [CaseID] | [Bank] | [Branch]
+            button_lbl = f"{relative_short} | {c['case_id']} | {c['bank']} | {c['branch']}"
             keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"view_{c['case_id']}")])
+            
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Fetching Adama records from the website, please wait...")
+    processing = await update.message.reply_text("⏳ Fetching Adama records, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Database Query Refused:*\n{status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
     report_text = format_summary_report(cases, days_limit=7, title="Weekly")
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Fetching Adama records from the website, please wait...")
+    processing = await update.message.reply_text("⏳ Fetching Adama records, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Database Query Refused:*\n{status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
     report_text = format_summary_report(cases, days_limit=30, title="Monthly")
     await update.message.reply_text(report_text, parse_mode="Markdown")
@@ -530,8 +566,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption_text = (
         f"📊 *ATM Cases Report – {datetime.now().strftime('%B %Y')}*\n\n"
-        "This report contains all ATM cases reported for monitoring. "
-        "Use this data to monitor ATM downtime and track technician performance."
+        "This report contains all ATM cases reported for monitoring."
     )
 
     await context.bot.send_document(
@@ -553,7 +588,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # User clicks "Terminate" -> Show confirmation panel
     if data.startswith("askterm_"):
         case_id = data.split("_")[1]
         confirm_text = (
@@ -572,21 +606,20 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # User confirms and clicks "Yes, Terminate"
     if data.startswith("do_terminate_"):
         case_id = data.split("_")[2]
-        await query.edit_message_text(f"⏳ Attempting terminal state authorization closure for Case ID `{case_id}`...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ Attempting terminal closure for Case ID `{case_id}`...", parse_mode="Markdown")
         
         success, err_msg = await terminate_case_on_dashboard(case_id)
         if success:
-            await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated on active dashboard database.", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated.", parse_mode="Markdown")
         else:
             keyboard = [
                 [InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")],
                 [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
             ]
             await query.edit_message_text(
-                text=f"❌ *Auth/Session rejection during termination attempt:*\n`{err_msg}`",
+                text=f"❌ *Termination failed:*\n`{err_msg}`",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -596,7 +629,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         case_id = data.split("_")[1]
         cases, status = await scrape_website_cases()
         if status != "OK":
-            return await query.edit_message_text(f"❌ Scraper failure while loading case: {status}")
+            return await query.edit_message_text(f"❌ Scraper failure: {status}")
         
         target = next((c for c in cases if c['case_id'] == case_id), None)
         if not target:
@@ -619,12 +652,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. STARTUP ENGLISH MENU INITIALIZER
+# 10. STARTUP MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
-    logger.info("Setting bot command definitions cleanly to English layout during startup sequence...")
-    
-    # "Access case termination actions (/terminate)" has been completely removed from this menu list
     commands = [
         BotCommand("start", "Initialize bot profile"),
         BotCommand("pending", "View open and unresolved cases"),
@@ -633,14 +663,13 @@ async def post_init(application: Application) -> None:
         BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
-    logger.info("English Menu commands loaded successfully onto API profile.")
 
 # ==========================================
 # 11. ENGINE INITIATION
 # ==========================================
 def main():
     if not BOT_TOKEN:
-        logger.error("SYSTEM ERROR: TELEGRAM_BOT_TOKEN environment variable is missing.")
+        logger.error("SYSTEM ERROR: TELEGRAM_BOT_TOKEN is missing.")
         return
 
     threading.Thread(target=run_health_server, daemon=True).start()
@@ -657,9 +686,7 @@ def main():
 
     job_queue = application.job_queue
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
-    logger.info("Auto-monitor dashboard background task configured to cycle every 10 minutes.")
 
-    logger.info("Bot application polling successfully initiated.")
     application.run_polling()
 
 if __name__ == '__main__':
