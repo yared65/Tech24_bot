@@ -3,7 +3,9 @@ import logging
 import asyncio
 import threading
 import urllib.parse
-from datetime import datetime
+import ast
+import json
+from datetime import datetime, timedelta
 from io import BytesIO
 from flask import Flask
 import httpx
@@ -21,17 +23,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 2. ENVIRONMENT VARIABLES
+# 2. ENVIRONMENT VARIABLES & GLOBALS
 # ==========================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
+# To track active users to send real-time alerts
+ACTIVE_CHATS = set()
+# To prevent duplicate notifications for the same case
+NOTIFIED_CASES = set()
+
 # ==========================================
 # 3. FLASK HEALTH-CHECK SERVER (For Uptime)
 # ==========================================
 app = Flask(__name__)
-# Suppress noisy Flask development logs
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 @app.route('/')
@@ -44,22 +50,44 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 4. UTILITY DATA PARSERS
+# 4. UTILITY DATA PARSERS (CLEANED)
 # ==========================================
 def extract_field(item, keyword):
-    """Safely extracts nested fields from complex API structures."""
+    """Safely extracts nested fields and cleans up raw string-dict structures."""
     if not isinstance(item, dict): 
         return ""
+    
+    val = None
     for k, v in item.items():
         if k.lower() == keyword.lower():
-            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
-    for k, v in item.items():
-        if keyword.lower() in k.lower():
-            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
-    return ""
+            val = v
+            break
+    if val is None:
+        for k, v in item.items():
+            if keyword.lower() in k.lower():
+                val = v
+                break
+
+    if val is None:
+        return ""
+
+    # If the value is a string representation of a dict, parse it
+    if isinstance(val, str) and (val.startswith('{') or val.startswith('[')):
+        try:
+            val = ast.literal_eval(val)
+        except Exception:
+            try:
+                val = json.loads(val)
+            except Exception:
+                pass
+
+    if isinstance(val, dict):
+        return val.get('name', val.get('title', val.get('bank_name', val.get('branch_name', str(val)))))
+    
+    return str(val)
 
 # ==========================================
-# 5. DASHBOARD API SCRAPING & MUTATION (CORRECTED)
+# 5. DASHBOARD API SCRAPING & MUTATION
 # ==========================================
 async def scrape_website_cases():
     """Authenticates and pulls active ATM cases from the tech24et dashboard."""
@@ -82,8 +110,6 @@ async def scrape_website_cases():
         try:
             # 1. Fetch CSRF cookie
             await session.get(csrf_url)
-            
-            # Extract CSRF token properly from the cookie jar
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if not xsrf_token:
                 for cookie in session.cookies:
@@ -98,13 +124,13 @@ async def scrape_website_cases():
                     'X-CSRF-TOKEN': decoded_token
                 })
 
-            # 2. Perform Login Request
+            # 2. Login
             login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
             login_res = await session.post(login_url, json=login_payload)
             if login_res.status_code not in [200, 201, 204]: 
                 return [], f"Login failed with status {login_res.status_code}"
 
-            # 3. Refresh CSRF token for the authenticated session
+            # 3. Refresh CSRF token for authenticated session
             updated_xsrf = session.cookies.get("XSRF-TOKEN")
             if updated_xsrf:
                 decoded_updated = urllib.parse.unquote(updated_xsrf)
@@ -113,7 +139,7 @@ async def scrape_website_cases():
                     'X-CSRF-TOKEN': decoded_updated
                 })
 
-            # 4. Fetch the Case Entries
+            # 4. Fetch Cases
             response = await session.get(api_url)
             if response.status_code != 200: 
                 return [], f"Failed to fetch data. Status: {response.status_code}"
@@ -126,7 +152,6 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict): 
                     continue
                 
-                # We filter specifically for 'adama' district cases
                 if "adama" in str(item).lower():
                     status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
                     status_text = "Completed" if status.lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
@@ -147,11 +172,11 @@ async def scrape_website_cases():
                     })
             return scraped_cases, "OK"
         except Exception as e:
-            logger.error(f"Scraper encountered error: {str(e)}")
+            logger.error(f"Scraper error: {str(e)}")
             return [], f"Error: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
-    """Sends patch/close request to terminate/complete a specific case on the remote dashboard."""
+    """Sends patch/close request to complete a specific case on the remote dashboard."""
     if not EMAIL or not PASSWORD:
         return False
 
@@ -169,7 +194,6 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
         try:
-            # 1. Fetch CSRF Token
             await session.get(csrf_url)
             xsrf = session.cookies.get("XSRF-TOKEN")
             if xsrf: 
@@ -179,12 +203,10 @@ async def terminate_case_on_dashboard(case_id):
                     'X-CSRF-TOKEN': decoded_xsrf
                 })
                 
-            # 2. Authorize session via login
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
             if login_res.status_code not in [200, 201, 204]:
                 return False
             
-            # 3. Re-verify XSRF token for mutative endpoint protection
             updated_xsrf = session.cookies.get("XSRF-TOKEN")
             if updated_xsrf:
                 decoded_updated = urllib.parse.unquote(updated_xsrf)
@@ -193,7 +215,6 @@ async def terminate_case_on_dashboard(case_id):
                     'X-CSRF-TOKEN': decoded_updated
                 })
                 
-            # 4. Dispatch status change
             res = await session.post(terminate_url, json={'status': 'completed'})
             return res.status_code in [200, 201, 204]
         except Exception as e:
@@ -204,11 +225,9 @@ async def terminate_case_on_dashboard(case_id):
 # 6. REPORT GENERATOR ENGINE
 # ==========================================
 async def build_formatted_report(title: str, days_filter: int = None) -> str:
-    """Generates a beautifully styled text report matching your precise format criteria."""
     cases, status_msg = await scrape_website_cases()
     if status_msg != "OK":
         return f"❌ **Error generating report**: {status_msg}"
-        
     if not cases:
         return "⚠️ **No data records found on the dashboard for Adama District.**"
 
@@ -218,7 +237,6 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
     for c in cases:
         if days_filter:
             try:
-                # Parse date string "YYYY-MM-DD HH:MM:SS"
                 case_date = datetime.strptime(c['date'].split(" ")[0], "%Y-%m-%d")
                 if (now - case_date).days > days_filter:
                     continue
@@ -230,22 +248,16 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
     if not filtered_cases:
         return f"⚠️ **No registered cases matching the {title.lower()} timeline filter.**"
 
-    # Determine lead tech or fall back dynamically
     technician_name = "Adama Tech Team"
     for c in filtered_cases:
         if c['technician'] != "Unassigned" and c['technician'] != "":
             technician_name = c['technician']
             break
 
-    # Build Header
     lines = [f"🏧 {title} report /{technician_name}/\n"]
-
-    # Statistics aggregation
     stats = {}
     
-    # Process each case entry line by line
     for c in filtered_cases:
-        # Standardize date output format to DD/MM/YYYY
         display_date = c['date'].split(" ")[0]
         try:
             dt = datetime.strptime(display_date, "%Y-%m-%d")
@@ -253,20 +265,16 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
         except:
             pass
 
-        # Build detailed line
         line_item = f"®️{display_date} Registered | {c['branch']} | {c['bank']} | ({c['issue']}) | {c['status']}"
         lines.append(line_item)
 
-        # Statistics math
         bank = c['bank'].strip()
         if bank not in stats:
             stats[bank] = {"registered": 0, "completed": 0}
-            
         stats[bank]["registered"] += 1
         if c['status'] == "Completed":
             stats[bank]["completed"] += 1
 
-    # Build summary section
     lines.append("\n       Generally \n")
     for bank_name, data in stats.items():
         lines.append(f" 🏛 {bank_name} Registered ")
@@ -280,8 +288,28 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
 # ==========================================
 # 7. TELEGRAM COMPONENT & INTERACTION UI
 # ==========================================
-def build_case_detail_ui(case):
-    """Crafts standard structured clean UI output cards for interactive cases."""
+def build_pending_ui(case):
+    """Card for PENDING command - Only 'Open Dashboard' button."""
+    text = (
+        f"📋 **Case ID Details:** {case['case_id']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 **Bank:** {case['bank']}\n"
+        f"🏛 **Branch:** {case['branch']}\n"
+        f"📟 **Terminal:** {case['terminal']} (Name: {case['atm_name']})\n"
+        f"🚨 **Issue Details:** {case['issue']}\n"
+        f"⚙️ **District:** {case['district']}\n"
+        f"🛡 **Status:** {case['status']}\n"
+        f"💬 **Comments:** {case['comment']}\n"
+        f"👤 **Tech Assigned:** {case['technician']} ({case['tech_phone']})\n"
+        f"⏰ **Logged Time:** {case['date']} (EAT)\n"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🗂 Open Dashboard Portal ↗️", url="https://tech24et.com")]
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+def build_terminate_ui(case):
+    """Card for TERMINATE workflow - Terminate, Dashboard, and Cancel buttons."""
     text = (
         f"📋 **Case ID Details:** {case['case_id']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -297,7 +325,7 @@ def build_case_detail_ui(case):
     )
     keyboard = [
         [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"terminate_{case['case_id']}")],
-        [InlineKeyboardButton("🔄 Refresh Details", callback_data=f"refresh_{case['case_id']}")],
+        [InlineKeyboardButton("🗂 Open Dashboard Portal ↗️", url="https://tech24et.com")],
         [InlineKeyboardButton("❌ Close Card", callback_data="cancel_action")]
     ]
     return text, InlineKeyboardMarkup(keyboard)
@@ -306,6 +334,8 @@ def build_case_detail_ui(case):
 # 8. COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Save chat ID for background notifications
+    ACTIVE_CHATS.add(update.effective_chat.id)
     welcome_text = (
         "👋 **Welcome to Tech24 Adama District Bot**\n\n"
         "💻 **Available Commands:**\n"
@@ -318,6 +348,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ACTIVE_CHATS.add(update.effective_chat.id)
     cases, status_msg = await scrape_website_cases()
     if status_msg != "OK": 
         return await update.message.reply_text(f"❌ **Connection Error**: {status_msg}", parse_mode="Markdown")
@@ -333,21 +364,23 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(pending_cases) == 1:
-        text, markup = build_case_detail_ui(pending_cases[0])
+        text, markup = build_pending_ui(pending_cases[0])
         await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
     else:
         keyboard = []
         for case in pending_cases:
             btn_text = f"⏳ {case['case_id']} | {case['bank']} - {case['branch']}"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_{case['case_id']}")])
+            # Prefix callback with 'showpending_' to distinguish from terminate selection
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"showpending_{case['case_id']}")])
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
         await update.message.reply_text(
-            "⏳ **Pending ATM Cases:**\nSelect any open case entry below to view logs or finalize termination on the server:",
+            "⏳ **Pending ATM Cases:**\nSelect any open case entry below to view logs on the server:",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
         )
 
 async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ACTIVE_CHATS.add(update.effective_chat.id)
     cases, status_msg = await scrape_website_cases()
     if status_msg != "OK": 
         return await update.message.reply_text(f"❌ **API Error**: Could not retrieve entries.", parse_mode="Markdown")
@@ -359,7 +392,8 @@ async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for case in pending_cases:
         btn_text = f"🛑 Complete Case {case['case_id']} ({case['bank']})"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"terminate_{case['case_id']}")])
+        # Prefix callback with 'showterm_' to show the termination card options
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"showterm_{case['case_id']}")])
     
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text(
@@ -424,28 +458,29 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    if data.startswith("show_"):
+    # User clicks a case under /pending -> Show card with Dashboard button only
+    if data.startswith("showpending_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
         selected = next((c for c in cases if c['case_id'] == case_id), None)
         if selected:
-            text, markup = build_case_detail_ui(selected)
+            text, markup = build_pending_ui(selected)
             await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
         else:
             await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
 
-    elif data.startswith("refresh_"):
+    # User clicks a case under /terminate -> Show card with Terminate, Dashboard, and Cancel buttons
+    elif data.startswith("showterm_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
         selected = next((c for c in cases if c['case_id'] == case_id), None)
         if selected:
-            text, markup = build_case_detail_ui(selected)
-            try:
-                await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
-                await query.answer("🔄 Record refreshed dynamically!")
-            except:
-                pass
+            text, markup = build_terminate_ui(selected)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
 
+    # User triggers the backend termination action
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
         await query.answer("⏳ Dispatching request to mark case completed...", show_alert=False)
@@ -454,7 +489,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if success:
             await query.edit_message_text(f"✅ **Success!** Case `{case_id}` has been closed and updated on the remote platform.", parse_mode="Markdown")
         else:
-            # Fallback action path
             await query.edit_message_text(
                 f"⚠️ **Server Update Failed:** Tried to complete Case `{case_id}` but could not confirm backend validation. Please check on-dashboard directly.",
                 parse_mode="Markdown",
@@ -462,13 +496,72 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
 # ==========================================
-# 10. MAIN BOT ENTRY POINT
+# 10. BACKGROUND TIMER ALERTS (10-Minute Windows)
+# ==========================================
+async def check_new_cases_loop(application: Application):
+    """Asynchronous background loop checking for newly registered pending cases (<10 mins)."""
+    while True:
+        try:
+            cases, status = await scrape_website_cases()
+            if status == "OK" and cases:
+                now = datetime.now()
+                for c in cases:
+                    if c['status'] == "Pending" and c['case_id'] not in NOTIFIED_CASES:
+                        try:
+                            # Parse case date: "YYYY-MM-DD HH:MM:SS"
+                            case_time = datetime.strptime(c['date'], "%Y-%m-%d %H:%M:%S")
+                            # Check if the case was registered within the last 10 minutes
+                            if now - case_time <= timedelta(minutes=10):
+                                # Craft layout matching the beautiful second photo style
+                                notification_text = (
+                                    f"🚨 **ATM Incident Notification**\n\n"
+                                    f"📝 **ID:** {c['case_id']},\n"
+                                    f"🏦 **Bank:** {c['bank']},\n"
+                                    f"⚠️ **Issue:** {c['issue']},\n"
+                                    f"🏢 **Branch:** {c['branch']},\n"
+                                    f"📍 **District:** {c['district']},\n"
+                                    f"💬 **Comment:** {c['comment']},\n"
+                                    f"🕒 **Reported at:** {c['date']}"
+                                )
+                                markup = InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("Open in tech24et.com dashboard", url="https://tech24et.com")]
+                                ])
+                                
+                                # Broadcast to all active chat sessions
+                                for chat_id in list(ACTIVE_CHATS):
+                                    try:
+                                        await application.bot.send_message(
+                                            chat_id=chat_id,
+                                            text=notification_text,
+                                            reply_markup=markup,
+                                            parse_mode="Markdown"
+                                        )
+                                    except Exception as send_err:
+                                        logger.warning(f"Could not broadcast to chat {chat_id}: {send_err}")
+                                
+                                # Mark as notified to prevent spam
+                                NOTIFIED_CASES.add(c['case_id'])
+                        except Exception as parse_err:
+                            logger.error(f"Error parsing date for case {c['case_id']}: {parse_err}")
+        except Exception as err:
+            logger.error(f"Background alert loop encountered an error: {err}")
+        
+        # Poll the server every 60 seconds
+        await asyncio.sleep(60)
+
+def start_background_loop(application):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(check_new_cases_loop(application))
+
+# ==========================================
+# 11. MAIN BOT ENTRY POINT
 # ==========================================
 def main():
-    # Start Keep-Alive background server
+    # Start Keep-Alive web server
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    # Initialize the core bot engine
+    # Initialize application
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Route bot commands
@@ -479,8 +572,11 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
     
-    # Route button inputs
+    # Route callback interactive selections
     application.add_handler(CallbackQueryHandler(button_click_handler))
+
+    # Run the background monitoring alert thread
+    threading.Thread(target=start_background_loop, args=(application,), daemon=True).start()
 
     logger.info("Bot starting up online polling loops...")
     application.run_polling()
