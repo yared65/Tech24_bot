@@ -30,7 +30,7 @@ NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID")
 SENT_CASES_TRACKER = set()
 
 # ==========================================
-# 2. FLASK SERVER FOR UPTIME (RENDER/UptimeRobot)
+# 2. FLASK SERVER FOR UPTIME
 # ==========================================
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -62,23 +62,18 @@ def safe_parse_json(val):
     return {}
 
 def extract_field(item, keyword):
-    """
-    JSON ጽሑፎችን ፈልቅቆ ንጹህ ስም ብቻ ያወጣል (ለምሳሌ፦ Awash, Oda Boqotu, ATM1)
-    """
     parsed = safe_parse_json(item)
     if not parsed:
         if isinstance(item, str):
             return item
         return ""
     
-    # Check directly for common key variations
     for k, v in parsed.items():
-        if k.lower() in [keyword.lower(), f"{keyword.lower()}name", f"{keyword.lower()} _name"]:
+        if k.lower() in [keyword.lower(), f"{keyword.lower()}name", f"{keyword.lower()}_name"]:
             if isinstance(v, dict):
                 return v.get('name', v.get('title', str(v)))
             return str(v)
             
-    # Fallback search if not found directly
     for k, v in parsed.items():
         if keyword.lower() in k.lower():
             if isinstance(v, dict):
@@ -87,7 +82,7 @@ def extract_field(item, keyword):
     return ""
 
 # ==========================================
-# 4. API CONNECTIONS (SCRAPER & TERMINATE)
+# 4. API CONNECTIONS
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -121,7 +116,6 @@ async def scrape_website_cases():
             cleaned_cases = []
             
             for item in raw_cases:
-                # ንጹህ መረጃዎችን የመፍለቂያ ክፍል (ያለ JSON ዝርክርክ)
                 bank_name = extract_field(item.get("bank", ""), "bank") or extract_field(item.get("bank_id", ""), "name")
                 branch_name = extract_field(item.get("branch", ""), "branch") or extract_field(item.get("branch_id", ""), "name")
                 terminal_id = extract_field(item.get("terminal", ""), "atmterminal") or extract_field(item.get("terminal_id", ""), "name") or item.get("terminal_id", "")
@@ -188,12 +182,9 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC 10-MINUTE PENDING MONITOR & NOTIFIER
+# 5. AUTOMATIC 10-MINUTE PENDING MONITOR
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
-    """
-    በየ 10 ደቂቃው ዳሽቦርዱን ቼክ በማድረግ Pending ኬዝ ሲያገኝ ብቻ የሚልክበት ክፍል
-    """
     if not NOTIFICATION_CHAT_ID:
         logger.warning("NOTIFICATION_CHAT_ID is not configured!")
         return
@@ -204,14 +195,13 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Scrape failed during auto-monitor: {status}")
         return
 
-    # Pending የሆኑ ኬዞችን ብቻ መለየት
     pending = [c for c in cases if c['status'].lower() not in ["completed", "terminated", "resolved"]]
     
     if not pending:
         logger.info("No pending cases found during check.")
         return
 
-    # ሁኔታ 1፦ አንድ Pending ኬዝ ብቻ ሲኖር (ልክ እንደ ሁለተኛው ፎቶ ፎርማት ይልካል)
+    # ሁኔታ 1፦ አንድ Pending ኬዝ ብቻ ሲኖር (2ኛው ፎቶ ፎርማት ይልካል)
     if len(pending) == 1:
         case = pending[0]
         if case['case_id'] not in SENT_CASES_TRACKER:
@@ -240,18 +230,16 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Failed sending single case alert: {e}")
 
-    # ሁኔታ 2፦ ሁለት እና ከዚያ በላይ ኬዝ ሲኖር (ልክ እንደ ሦስተኛው ፎቶ በአዝራር ዝርዝር ብቻ ይልካል)
+    # ሁኔታ 2፦ ሁለት እና ከዚያ በላይ ኬዝ ሲኖር (3ኛው ፎቶ ፎርማት ይልካል)
     else:
-        # አዲስ ኬዞች መኖራቸውን ማረጋገጫ (ቢያንስ አንዱ ካልተላከ ለመላክ)
         new_cases_found = any(c['case_id'] not in SENT_CASES_TRACKER for c in pending)
         if new_cases_found:
             text = "⚠️ **Multiple Pending ATM cases have been reported.** Select a case below to view details or proceed with resolution:"
             keyboard = []
             for case in pending[:15]:
-                # አዝራሮቹ የ Case ID፣ Bank እና Branch መረጃዎችን ይይዛሉ
                 button_label = f"{case['case_id']} | {case['bank']} | {case['branch']}"
                 keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
-                SENT_CASES_TRACKER.add(case['case_id'])  # ኖቲፊኬሽን እንደተላከ ምልክት ማድረግ
+                SENT_CASES_TRACKER.add(case['case_id'])
             
             try:
                 await context.bot.send_message(
@@ -276,7 +264,6 @@ async def send_pending_cases_ui(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if not pending:
         return await context.bot.send_message(chat_id=chat_id, text="✨ No actions needed. All logged issues are completed.")
 
-    # ሁኔታ 1፦ አንድ ኬዝ ብቻ ሲኖር (2ኛው ፎቶ ፎርማት)
     if len(pending) == 1:
         case = pending[0]
         text = (
@@ -296,7 +283,6 @@ async def send_pending_cases_ui(chat_id, context: ContextTypes.DEFAULT_TYPE):
         ]
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # ሁኔታ 2፦ ሁለት እና ከዚያ በላይ ኬዝ ሲኖር (3ኛው ፎቶ ፎርማት)
     else:
         text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details and proceed with resolution."
         keyboard = []
@@ -414,9 +400,10 @@ def generate_excel_bytes(cases):
     return buffer
 
 # ==========================================
-# 8. TELEGRAM COMMAND HANDLERS (ENGLISH UI)
+# 8. TELEGRAM COMMAND HANDLERS & English Menu Setter
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 📌 ይህ ክፍል የቴሌግራም ሜኑን በግዳጅ ወደ እንግሊዝኛ እንዲቀይር ያደርገዋል
     commands = [
         BotCommand("start", "Initialize your session"),
         BotCommand("pending", "View open/unresolved cases"),
@@ -425,6 +412,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BotCommand("monthly", "View structured Monthly summary report"),
         BotCommand("export", "Generate and download database spreadsheet")
     ]
+    # ለሁሉም ተጠቃሚዎች የሜኑ ትዕዛዞችን ወደ እንግሊዝኛ መቀየር
     await context.bot.set_my_commands(commands)
     
     welcome_text = (
@@ -528,7 +516,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not case:
             return await query.edit_message_text("❌ Case details not found.")
 
-        # አንድ ኬዝ ሲሆን የሚወጣበት (2ኛው ፎቶ ፎርማት)
         text = (
             f"📋 **Case ID Details: {case['case_id']}**\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
@@ -560,16 +547,14 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # 10. ENGINE INITIATION
 # ==========================================
 def main():
-    # Flaskን በጀርባ ማስጀመር (ለUptime)
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(BOT_TOKEN).build()
     job_queue = application.job_queue
 
-    # 1. በየ 10 ደቂቃው (600 ሰከንድ) ዳሽቦርዱን ቼክ እያደረገ አዲስ Pendings የሚልክበት Background Job
+    # በየ 10 ደቂቃው ዳሽቦርዱን ቼክ እያደረገ የሚልክበት (Auto Polling)
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
 
-    # 2. የአዝራርና የኮማንድ መቆጣጠሪያዎች
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
