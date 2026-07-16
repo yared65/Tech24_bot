@@ -203,7 +203,13 @@ async def scrape_website_cases():
                             except Exception:
                                 date_obj = datetime.now()
 
-                    status_raw = str(entry.get('status', entry.get('progress', 'Pending'))).lower()
+                    # Corrected Robust Status Parsing
+                    status_val = entry.get('status')
+                    if isinstance(status_val, dict):
+                        status_raw = str(status_val.get('name', status_val.get('title', 'Pending'))).lower()
+                    else:
+                        status_raw = str(status_val or entry.get('progress', 'Pending')).lower()
+
                     status_text = "Completed" if status_raw in ["complete", "completed", "1", "done"] else "On going"
 
                     scraped_cases.append({
@@ -310,7 +316,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS
+# 6. DYNAMIC UI BUILDERS (WITH TERMINATE BUTTON IN DETAIL VIEW)
 # ==========================================
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case['date_obj'])
@@ -331,6 +337,7 @@ def build_case_detail_ui(case):
         f"Relative Time: {relative_long}"
     )
     
+    # "Terminate" button is kept here because it is useful to terminate directly from the card
     keyboard = [
         [InlineKeyboardButton("Terminate", callback_data=f"askterm_{case['case_id']}")],
         [InlineKeyboardButton("Refresh", callback_data=f"refresh_{case['case_id']}")],
@@ -546,14 +553,13 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # User clicks "Terminate" -> Show Confirmation Screen
+    # User clicks "Terminate" -> Show confirmation panel
     if data.startswith("askterm_"):
         case_id = data.split("_")[1]
         confirm_text = (
             f"⚠️ *Confirmation Required*\n\n"
             f"Are you sure you want to terminate/close Case ID: *{case_id}*?"
         )
-        # Three requested options: go back, yes terminate, no cancel
         confirm_keyboard = [
             [InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")],
             [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")],
@@ -617,6 +623,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ==========================================
 async def post_init(application: Application) -> None:
     logger.info("Setting bot command definitions cleanly to English layout during startup sequence...")
+    
+    # "Access case termination actions (/terminate)" has been completely removed from this menu list
     commands = [
         BotCommand("start", "Initialize bot profile"),
         BotCommand("pending", "View open and unresolved cases"),
