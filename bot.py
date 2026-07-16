@@ -3,6 +3,7 @@ import logging
 import asyncio
 import threading
 import json
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -59,55 +60,107 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST NESTED JSON PARSING HELPERS
+# 3. ROBUST DEEP JSON PARSING HELPER (BUG FIX FOR PHOTO 3317)
 # ==========================================
-def safe_parse_json(val):
-    if not val:
-        return {}
-    if isinstance(val, dict):
-        return val
-    try:
-        if isinstance(val, str):
-            cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
-            return json.loads(cleaned)
-    except Exception:
-        pass
-    return {}
+def deep_extract_name(data, target_keyword):
+    """
+    Recursively searches inside dicts/lists to find values matching 
+    the target keyword (e.g., 'name', 'bank_name', 'branch_name', etc.).
+    """
+    if not data:
+        return None
+
+    # If it is a dictionary
+    if isinstance(data, dict):
+        # 1st priority: Look for common title/name keys
+        for key in ['name', 'title', 'bank_name', 'branch_name', 'terminal_id', 'serial_number']:
+            if key in data and data[key]:
+                if isinstance(data[key], (dict, list)):
+                    res = deep_extract_name(data[key], target_keyword)
+                    if res: return res
+                return str(data[key])
+                
+        # 2nd priority: Look for keys containing our keyword
+        for k, v in data.items():
+            if target_keyword.lower() in k.lower() and v:
+                if isinstance(v, (dict, list)):
+                    res = deep_extract_name(v, target_keyword)
+                    if res: return res
+                return str(v)
+                
+        # 3rd priority: Deep dive into all values
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                res = deep_extract_name(v, target_keyword)
+                if res: return res
+
+    # If it is a list
+    elif isinstance(data, list):
+        for item in data:
+            res = deep_extract_name(item, target_keyword)
+            if res:
+                return res
+                
+    return None
+
+def clean_raw_string(text):
+    """
+    Fallback regex cleaner. If the string contains database-like dump fields,
+    it extracts only the meaningful name (e.g., from 'bank_name: Awash Bank' -> 'Awash Bank')
+    """
+    if not text:
+        return ""
+    # Try to search for patterns like 'name': 'Value' or "name": "Value" or bank_name etc.
+    patterns = [
+        r'[\'"]name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]bank_name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]branch_name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]title[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+            
+    # Remove braces and quotes if it's still messy
+    cleaned = re.sub(r'[{}\'"\[\]]', '', text)
+    if 'name:' in cleaned:
+        parts = cleaned.split('name:')
+        if len(parts) > 1:
+            return parts[1].split(',')[0].strip()
+            
+    return text.strip()
 
 def extract_field(item, keyword):
     """
-    Cleans database rows. Accurately extracts values whether the input is
-    a dictionary, a serialized JSON string, or a clean plain string (like Oda Boqotu).
+    Cleans database rows and extracts the most human-readable name.
     """
     if not item:
         return ""
-        
-    # Case 1: If it is already a dictionary
-    if isinstance(item, dict):
-        # First try matching keys
-        for k, v in item.items():
-            if keyword.lower() in k.lower():
-                if isinstance(v, dict):
-                    return v.get('name', v.get('title', str(v)))
-                return str(v)
-        # Fallbacks for dictionary
-        for fallback in ['name', 'title', 'bank_name', 'branch_name', 'terminal_id', 'serial_number']:
-            if fallback in item:
-                return str(item[fallback])
-        return str(item)
 
-    # Case 2: If it is a string
+    # If it is already a dictionary, deep search it
+    if isinstance(item, dict):
+        extracted = deep_extract_name(item, keyword)
+        if extracted:
+            return extracted
+
+    # If it's a string representation of a JSON
     if isinstance(item, str):
-        item_stripped = item.strip()
-        # If it looks like a JSON string, try to parse it
-        if (item_stripped.startswith('{') and item_stripped.endswith('}')) or (item_stripped.startswith('[') and item_stripped.endswith(']')):
-            parsed = safe_parse_json(item_stripped)
-            if parsed and isinstance(parsed, dict):
-                return extract_field(parsed, keyword)
+        stripped = item.strip()
+        if (stripped.startswith('{') and stripped.endswith('}')) or (stripped.startswith('[') and stripped.endswith(']')):
+            try:
+                # Replace python-specific None/True/False to make it valid JSON
+                valid_json_str = stripped.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
+                parsed = json.loads(valid_json_str)
+                extracted = deep_extract_name(parsed, keyword)
+                if extracted:
+                    return extracted
+            except Exception:
+                pass
         
-        # If it's a plain string, return it directly
-        return item_stripped
-            
+        # Fallback to Regex cleaner for raw unparsed strings
+        return clean_raw_string(stripped)
+
     return str(item)
 
 # ==========================================
@@ -178,7 +231,7 @@ async def scrape_website_cases():
                     created_at = entry.get('created_at', entry.get('start_date', ''))
                     date_str = str(created_at)[:10] if created_at else "N/A"
                     
-                    # Parse timestamp strictly safely for duration sorting
+                    # Parse timestamp safely for duration sorting
                     try:
                         date_obj = datetime.strptime(str(created_at)[:19], "%Y-%m-%dT%H:%M:%S")
                     except Exception:
@@ -187,12 +240,11 @@ async def scrape_website_cases():
                         except Exception:
                             date_obj = datetime.now()
 
-                    # --- CRITICAL BUG FIX FOR STATUS CLASSIFICATION ---
+                    # Status classification
                     status_raw = extract_field(entry.get('status'), 'status') or str(entry.get('status', ''))
                     status_raw = status_raw.strip().lower()
                     progress_raw = str(entry.get('progress', '')).strip().lower()
                     
-                    # Check if status indicates closed or completed
                     closed_keywords = ["complete", "completed", "done", "close", "closed", "resolved", "terminated", "success"]
                     
                     is_completed = False
@@ -202,7 +254,6 @@ async def scrape_website_cases():
                         is_completed = True
 
                     status_text = "Completed" if is_completed else "Pending"
-                    # --------------------------------------------------
 
                     scraped_cases.append({
                         'case_id': case_id,
@@ -299,7 +350,9 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         text = f"🚨 *{len(new_pending_cases)} New Pending Cases Detected!*\nSelect a case button below to view details and actions:"
         keyboard = []
         for case in new_pending_cases:
-            button_label = f"🏧 {case['bank']} - {case['branch']} (ID: {case['case_id']})"
+            clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+            clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+            button_label = f"🏧 {clean_bank} - {clean_branch} (ID: {case['case_id']})"
             keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
         
         await context.bot.send_message(
@@ -310,26 +363,26 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS
+# 6. DYNAMIC UI BUILDERS (WITH DEEP EXTRACTION ON SELECTED VIEW)
 # ==========================================
 def build_case_detail_ui(case):
-    # CRITICAL UI CLEANING FIX: Extract clean strings for separate detail view
+    # Deep extract and clean all fields for the interface
     clean_bank = extract_field(case['bank'], 'bank')
     clean_branch = extract_field(case['branch'], 'branch')
     clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number')
     clean_tech = extract_field(case['technician'], 'name')
 
-    # Fallback to current values if clean fails
-    clean_bank = clean_bank if clean_bank else case['bank']
-    clean_branch = clean_branch if clean_branch else case['branch']
-    clean_terminal = clean_terminal if clean_terminal else case['terminal']
-    clean_tech = clean_tech if clean_tech else case['technician']
+    # Fallback to original values if extraction returns empty
+    clean_bank = clean_bank if clean_bank else str(case['bank'])
+    clean_branch = clean_branch if clean_branch else str(case['branch'])
+    clean_terminal = clean_terminal if clean_terminal else str(case['terminal'])
+    clean_tech = clean_tech if clean_tech else str(case['technician'])
 
     # Safely escape text to avoid Markdown parsing exceptions
     safe_bank = clean_bank.replace("_", "\\_").replace("*", "\\*")
     safe_branch = clean_branch.replace("_", "\\_").replace("*", "\\*")
     safe_terminal = clean_terminal.replace("_", "\\_").replace("*", "\\*")
-    safe_issue = case['issue'].replace("_", "\\_").replace("*", "\\*")
+    safe_issue = str(case['issue']).replace("_", "\\_").replace("*", "\\*")
     safe_tech = clean_tech.replace("_", "\\_").replace("*", "\\*")
     
     text = (
