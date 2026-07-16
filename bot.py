@@ -2,18 +2,17 @@ import os
 import logging
 import asyncio
 import threading
-import json
+import urllib.parse
 from datetime import datetime, timedelta
 from io import BytesIO
 from flask import Flask
 import httpx
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ==========================================
-# 1. LOGGING & SYSTEM CONFIGURATION
+# 1. LOGGING SETUP
 # ==========================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -21,24 +20,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==========================================
+# 2. ENVIRONMENT VARIABLES
+# ==========================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
-NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID")
-
-SENT_CASES_TRACKER = set()
 
 # ==========================================
-# 2. FLASK SERVER - FIXES 404 UPTIME ERRORS
+# 3. FLASK HEALTH-CHECK SERVER (For Uptime)
 # ==========================================
 app = Flask(__name__)
+# Suppress noisy Flask development logs
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-# Catch-all route: UptimeRobot ወይም ሌላ ሞኒተር ሊንኩን በማንኛውም መልኩ ቢጠራው 404 እንዳይሰጥ 200 OK ይመልሳል
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def home(path):
-    return "Tech24 Bot is Live and Healthy!", 200
+@app.route('/')
+def home():
+    return "Bot is alive and running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -46,45 +44,27 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. JSON PARSING HELPERS (CLEAN UI TEXTS)
+# 4. UTILITY DATA PARSERS
 # ==========================================
-def safe_parse_json(val):
-    if not val:
-        return {}
-    if isinstance(val, dict):
-        return val
-    try:
-        if isinstance(val, str):
-            cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
-            return json.loads(cleaned)
-    except Exception:
-        pass
-    return {}
-
 def extract_field(item, keyword):
-    if not item:
+    """Safely extracts nested fields from complex API structures."""
+    if not isinstance(item, dict): 
         return ""
-    if isinstance(item, dict):
-        for k, v in item.items():
-            if k.lower() == keyword.lower() or keyword.lower() in k.lower():
-                return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
-    
-    parsed = safe_parse_json(item)
-    if parsed:
-        for k, v in parsed.items():
-            if k.lower() == keyword.lower() or keyword.lower() in k.lower():
-                return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
-                
-    if isinstance(item, str):
-        return item
+    for k, v in item.items():
+        if k.lower() == keyword.lower():
+            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
+    for k, v in item.items():
+        if keyword.lower() in k.lower():
+            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
     return ""
 
 # ==========================================
-# 4. API SCRAPER & PRODUCTION ACTIONS
+# 5. DASHBOARD API SCRAPING & MUTATION
 # ==========================================
 async def scrape_website_cases():
+    """Authenticates and pulls active ATM cases from the tech24et dashboard."""
     if not EMAIL or not PASSWORD:
-        return [], "Configuration Error: Missing login credentials."
+        return [], "Configuration Error: Missing login credentials in Environment Variables."
 
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
@@ -100,16 +80,22 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
+            # 1. Fetch CSRF token
             await session.get(csrf_url)
+            xsrf_token = session.cookies.get("XSRF-TOKEN")
+            if xsrf_token: 
+                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+
+            # 2. Login
             login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
             login_res = await session.post(login_url, json=login_payload)
-            
             if login_res.status_code not in [200, 201, 204]: 
-                return [], f"Login failed with status {login_res.status_code}"
+                return [], f"Login failed with status code {login_res.status_code}"
 
+            # 3. Fetch Case Entries
             response = await session.get(api_url)
             if response.status_code != 200: 
-                return [], f"API data fetch failed. Status: {response.status_code}"
+                return [], f"Failed to fetch data. Status: {response.status_code}"
 
             data = response.json()
             cases_list = data.get('data', []) if isinstance(data, dict) else data
@@ -119,38 +105,32 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict): 
                     continue
                 
+                # We filter specifically for 'adama' district cases
                 if "adama" in str(item).lower():
-                    status_raw = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
-                    status_text = "Completed" if status_raw.lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
+                    status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
+                    status_text = "Completed" if status.lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
                     
-                    date_str = str(item.get('created_at', ''))[:19].replace('T', ' ')
-                    date_obj = datetime.now()
-                    try:
-                        date_obj = datetime.strptime(date_str.split(" ")[0], "%Y-%m-%d")
-                    except:
-                        pass
-
                     scraped_cases.append({
                         'case_id': str(item.get('callentry_id', item.get('id', 'N/A'))),
-                        'terminal': extract_field(item, 'terminal') or "N/A",
+                        'terminal': extract_field(item, 'terminal') or extract_field(item, 'atm_id') or "N/A",
                         'bank': extract_field(item, 'bank') or "Awash",
                         'branch': extract_field(item, 'branch') or "Adama Branch",
                         'issue': extract_field(item, 'description') or extract_field(item, 'issue') or "No Description",
                         'status': status_text,
                         'district': "Adama",
-                        'atm_name': extract_field(item, 'atm_name') or "N/A",
+                        'atm_name': extract_field(item, 'atm_name') or extract_field(item, 'terminal') or "N/A",
                         'comment': extract_field(item, 'comment') or extract_field(item, 'note') or "None",
-                        'technician': extract_field(item, 'technician') or "Unassigned",
+                        'technician': extract_field(item, 'technician') or extract_field(item, 'assigned_to') or "Unassigned",
                         'tech_phone': extract_field(item, 'phone') or "N/A",
-                        'date': date_str,
-                        'date_obj': date_obj
+                        'date': str(item.get('created_at', ''))[:19].replace('T', ' ')
                     })
             return scraped_cases, "OK"
         except Exception as e:
-            logger.error(f"Scraper error: {str(e)}")
-            return [], str(e)
+            logger.error(f"Scraper encountered error: {str(e)}")
+            return [], f"Error: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
+    """Sends patch/close request to terminate/complete a specific case on the remote dashboard."""
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
@@ -165,69 +145,122 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
         try:
+            # Prepare session tokens
             await session.get(csrf_url)
+            xsrf = session.cookies.get("XSRF-TOKEN")
+            if xsrf: 
+                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf)})
+                
+            # Log in to authorize session
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
             if login_res.status_code not in [200, 201, 204]:
                 return False
             
+            # Re-verify XSRF to prevent session mismatches on the mutative endpoint
+            updated_xsrf = session.cookies.get("XSRF-TOKEN")
+            if updated_xsrf:
+                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(updated_xsrf)})
+                
             res = await session.post(terminate_url, json={'status': 'completed'})
             return res.status_code in [200, 201, 204]
         except Exception as e:
-            logger.error(f"Failed to close case {case_id}: {e}")
+            logger.error(f"Failed to terminate Case {case_id}: {e}")
             return False
 
 # ==========================================
-# 5. AUTOMATIC 10-MINUTE MONITOR ENGINE
+# 6. REPORT GENERATOR ENGINE
 # ==========================================
-async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
-    if not NOTIFICATION_CHAT_ID:
-        return
+async def build_formatted_report(title: str, days_filter: int = None) -> str:
+    """Generates a beautifully styled text report matching your precise format criteria."""
+    cases, status_msg = await scrape_website_cases()
+    if status_msg != "OK":
+        return f"❌ **Error generating report**: {status_msg}"
+        
+    if not cases:
+        return "⚠️ **No data records found on the dashboard for Adama District.**"
 
-    cases, status = await scrape_website_cases()
-    if status != "OK":
-        return
-
-    pending_cases = [c for c in cases if c['status'] == "Pending"]
+    now = datetime.now()
+    filtered_cases = []
     
-    for case in pending_cases:
-        if case['case_id'] not in SENT_CASES_TRACKER:
-            text = (
-                f"📋 **Case ID Details:** {case['case_id']}\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🏦 **Bank:** {case['bank']}\n"
-                f"🏛 **Branch:** {case['branch']}\n"
-                f"📟 **Terminal:** {case['terminal']}\n"
-                f"🚨 **Issue:** {case['issue']}\n"
-                f"👤 **Technician Assigned:** {case['technician']}\n"
-            )
-            keyboard = [[InlineKeyboardButton("🛑 Terminate Case", callback_data=f"terminate_{case['case_id']}")]]
-            
+    for c in cases:
+        if days_filter:
             try:
-                await context.bot.send_message(
-                    chat_id=NOTIFICATION_CHAT_ID,
-                    text=text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown"
-                )
-                SENT_CASES_TRACKER.add(case['case_id'])
+                # Parse date string "YYYY-MM-DD HH:MM:SS"
+                case_date = datetime.strptime(c['date'].split(" ")[0], "%Y-%m-%d")
+                if (now - case_date).days > days_filter:
+                    continue
             except Exception as e:
-                logger.error(f"Error sending auto notification: {e}")
+                logger.warning(f"Could not parse date {c['date']}: {e}")
+                pass
+        filtered_cases.append(c)
+
+    if not filtered_cases:
+        return f"⚠️ **No registered cases matching the {title.lower()} timeline filter.**"
+
+    # Determine lead tech or fall back dynamically
+    technician_name = "Adama Tech Team"
+    for c in filtered_cases:
+        if c['technician'] != "Unassigned" and c['technician'] != "":
+            technician_name = c['technician']
+            break
+
+    # Build Header
+    lines = [f"🏧 {title} report /{technician_name}/\n"]
+
+    # Statistics aggregation
+    stats = {}
+    
+    # Process each case entry line by line
+    for c in filtered_cases:
+        # Standardize date output format to DD/MM/YYYY
+        display_date = c['date'].split(" ")[0]
+        try:
+            dt = datetime.strptime(display_date, "%Y-%m-%d")
+            display_date = dt.strftime("%d/%m/%Y")
+        except:
+            pass
+
+        # Build detailed line
+        line_item = f"®️{display_date} Registered | {c['branch']} | {c['bank']} | ({c['issue']}) | {c['status']}"
+        lines.append(line_item)
+
+        # Statistics math
+        bank = c['bank'].strip()
+        if bank not in stats:
+            stats[bank] = {"registered": 0, "completed": 0}
+            
+        stats[bank]["registered"] += 1
+        if c['status'] == "Completed":
+            stats[bank]["completed"] += 1
+
+    # Build summary section
+    lines.append("\n       Generally \n")
+    for bank_name, data in stats.items():
+        lines.append(f" 🏛 {bank_name} Registered ")
+        lines.append(f"           Completed - {data['completed']}")
+        pending = data['registered'] - data['completed']
+        if pending > 0:
+            lines.append(f"           Pending - {pending}")
+
+    return "\n".join(lines)
 
 # ==========================================
-# 6. UI BUILDER LOGIC FOR PENDING COMMANDS
+# 7. TELEGRAM COMPONENT & INTERACTION UI
 # ==========================================
 def build_case_detail_ui(case):
+    """Crafts standard structured clean UI output cards for interactive cases."""
     text = (
         f"📋 **Case ID Details:** {case['case_id']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🏦 **Bank:** {case['bank']}\n"
         f"🏛 **Branch:** {case['branch']}\n"
-        f"📟 **Terminal:** {case['terminal']} ({case['atm_name']})\n"
-        f"🚨 **Issue:** {case['issue']}\n"
+        f"📟 **Terminal:** {case['terminal']} (Name: {case['atm_name']})\n"
+        f"🚨 **Issue Details:** {case['issue']}\n"
+        f"⚙️ **District:** {case['district']}\n"
         f"🛡 **Status:** {case['status']}\n"
-        f"💬 **Comment:** {case['comment']}\n"
-        f"👤 **Technician:** {case['technician']} ({case['tech_phone']})\n"
-        f"⏰ **Time:** {case['date']}\n"
+        f"💬 **Comments:** {case['comment']}\n"
+        f"👤 **Tech Assigned:** {case['technician']} ({case['tech_phone']})\n"
+        f"⏰ **Logged Time:** {case['date']} (EAT)\n"
     )
     keyboard = [
         [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"terminate_{case['case_id']}")],
@@ -236,142 +269,93 @@ def build_case_detail_ui(case):
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
-async def send_pending_cases_ui(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    cases, status = await scrape_website_cases()
-    if status != "OK":
-        return await context.bot.send_message(chat_id=chat_id, text=f"❌ Error: {status}")
-
-    pending = [c for c in cases if c['status'] == "Pending"]
-    if not pending:
-        return await context.bot.send_message(chat_id=chat_id, text="✅ **All clear!** No pending cases in Adama.")
-
-    if len(pending) == 1:
-        text, markup = build_case_detail_ui(pending[0])
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        keyboard = []
-        for c in pending:
-            btn_text = f"⏳ {c['case_id']} | {c['bank']} - {c['branch']}"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_{c['case_id']}")])
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-        
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏳ **Pending ATM Cases List:**\nSelect an incident entry below to view logs:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-
 # ==========================================
-# 7. FORMATTED REPORT ENGINE (WEEKLY & MONTHLY)
-# ==========================================
-def format_summary_report(cases, title, days_limit=7):
-    now = datetime.now()
-    cutoff_date = now - timedelta(days=days_limit)
-    filtered = [c for c in cases if c['date_obj'] >= cutoff_date]
-
-    if not filtered:
-        return f"⚠️ No registered cases matching the {title.lower()} period filter."
-
-    tech_name = "Adama Tech Team"
-    for c in filtered:
-        if c['technician'] != "Unassigned" and c['technician'] != "":
-            tech_name = c['technician']
-            break
-
-    lines = [f"🏧 {title}  report /{tech_name}/"]
-    
-    stats = {}
-    for c in filtered:
-        display_date = c['date'].split(" ")[0]
-        try:
-            dt = datetime.strptime(display_date, "%Y-%m-%d")
-            display_date = dt.strftime("%d/%m/%Y")
-        except:
-            pass
-            
-        line_item = f"®️{display_date} Registered | {c['branch']} | {c['bank']} | ({c['issue']}) | {c['status']}"
-        lines.append(line_item)
-
-        bank = c['bank'].strip()
-        if bank not in stats:
-            stats[bank] = {"registered": 0, "completed": 0}
-        stats[bank]["registered"] += 1
-        if c['status'] == "Completed":
-            stats[bank]["completed"] += 1
-
-    lines.append("\n       Generally ")
-    for bank_name, data in stats.items():
-        lines.append(f" 🏛 {bank_name} Registered ")
-        lines.append(f"           Completed - {data['completed']}")
-        pending_count = data['registered'] - data['completed']
-        if pending_count > 0:
-            lines.append(f"           Pending - {pending_count}")
-
-    return "\n".join(lines)
-
-# ==========================================
-# 8. TELEGRAM COMMAND HANDLERS
+# 8. COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 Welcome to Tech24 Adama District Bot \n\n"
-        "💻 Available Commands: \n"
-        "• /pending - View all current open/unresolved cases\n"
+        "👋 **Welcome to Tech24 Adama District Bot**\n\n"
+        "💻 **Available Commands:**\n"
+        "• /pending   - View all current open/unresolved cases\n"
         "• /terminate - Access list of cases to quickly terminate/complete\n"
-        "• /report - View structured Weekly summary report\n"
-        "• /monthly - View structured Monthly summary report\n"
-        "• /export - Generate and download spreadsheet raw database dump"
+        "• /report    - View structured Weekly summary report\n"
+        "• /monthly   - View structured Monthly summary report\n"
+        "• /export    - Generate and download spreadsheet raw database dump"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_pending_cases_ui(update.effective_chat.id, context)
+    cases, status_msg = await scrape_website_cases()
+    if status_msg != "OK": 
+        return await update.message.reply_text(f"❌ **Connection Error**: {status_msg}", parse_mode="Markdown")
+
+    pending_cases = [c for c in cases if c['status'] == "Pending"]
+
+    if not pending_cases:
+        keyboard = [[InlineKeyboardButton("🗂 Access Live Dashboard ↗️", url="https://tech24et.com")]]
+        await update.message.reply_text(
+            "✅ **All clear!** No pending or ongoing cases found in **Adama District**.",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if len(pending_cases) == 1:
+        text, markup = build_case_detail_ui(pending_cases[0])
+        await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        keyboard = []
+        for case in pending_cases:
+            btn_text = f"⏳ {case['case_id']} | {case['bank']} - {case['branch']}"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_{case['case_id']}")])
+        
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+        await update.message.reply_text(
+            "⏳ **Pending ATM Cases:**\nSelect any open case entry below to view logs or finalize termination on the server:",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
 
 async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cases, status = await scrape_website_cases()
-    if status != "OK":
-        return await update.message.reply_text("❌ Error fetching active cases.")
+    cases, status_msg = await scrape_website_cases()
+    if status_msg != "OK": 
+        return await update.message.reply_text(f"❌ **API Error**: Could not retrieve entries.", parse_mode="Markdown")
         
-    pending = [c for c in cases if c['status'] == "Pending"]
-    if not pending:
-        return await update.message.reply_text("✨ No open cases require termination right now.")
+    pending_cases = [c for c in cases if c['status'] == "Pending"]
+    if not pending_cases:
+        return await update.message.reply_text("✨ **No actions needed.** All logged issues are completed.", parse_mode="Markdown")
 
     keyboard = []
-    for c in pending:
-        keyboard.append([InlineKeyboardButton(f"🛑 Complete Case {c['case_id']} ({c['bank']})", callback_data=f"terminate_{c['case_id']}")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+    for case in pending_cases:
+        btn_text = f"🛑 Complete Case {case['case_id']} ({case['bank']})"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"terminate_{case['case_id']}")])
     
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text(
-        "🛠 **Termination Action Center:**\nChoose an operational live case entry to close on the remote dashboard:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        "🛠 **Termination Action Center:**\nChoose a case entry below to mark as completed directly on the Tech24 dashboard:",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cases, status = await scrape_website_cases()
-    if status != "OK":
-        return await update.message.reply_text(f"❌ Error compiling report: {status}")
-    report_out = format_summary_report(cases, "Weekly", 7)
-    await update.message.reply_text(report_out)
+    proc = await update.message.reply_text("⏳ Processing Weekly Case Summary...")
+    report_text = await build_formatted_report("Weekly", days_filter=7)
+    await proc.delete()
+    await update.message.reply_text(report_text)
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cases, status = await scrape_website_cases()
-    if status != "OK":
-        return await update.message.reply_text(f"❌ Error compiling report: {status}")
-    report_out = format_summary_report(cases, "Monthly", 30)
-    await update.message.reply_text(report_out)
+    proc = await update.message.reply_text("⏳ Processing Monthly Case Summary...")
+    report_text = await build_formatted_report("Monthly", days_filter=30)
+    await proc.delete()
+    await update.message.reply_text(report_text)
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proc = await update.message.reply_text("⏳ Compiling and cleaning spreadsheet logs...")
+    proc = await update.message.reply_text("⏳ Compiling data logs & creating Excel workbook...")
     cases, status = await scrape_website_cases()
+    
     if not cases:
-        return await proc.edit_text("❌ Data dump returned an empty grid framework.")
+        return await proc.edit_text("❌ Data compilation returned empty database.", parse_mode="Markdown")
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "ATM Incident Log"
-    ws.views.sheetView[0].showGridLines = True
     
     headers = ["Case ID", "Bank", "Branch", "Terminal ID", "Issue Description", "Resolution Status", "Assigned Technician", "Creation Timestamp", "Notes/Comments"]
     ws.append(headers)
@@ -383,15 +367,20 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wb.save(excel_file)
     excel_file.seek(0)
     
-    await proc.delete()
-    await update.message.reply_document(
-        document=excel_file,
-        filename=f"atm-report-{datetime.now().strftime('%Y-%m-%d')}.xlsx",
-        caption="📊 **ATM Operational Log Export**\nAutomated worksheet database dump updated successfully."
+    now_label = datetime.now().strftime("%B %Y")
+    filename = f"atm-case-report-{datetime.now().strftime('%Y-%b').lower()}.xlsx"
+    
+    caption = (
+        f"📊 **ATM Case Log Export**\n"
+        f"📅 **Reporting Period:** {now_label}\n\n"
+        "Automated administrative worksheet showing full issue records, down-times, and engineering logs."
     )
 
+    await proc.delete()
+    await update.message.reply_document(document=excel_file, filename=filename, caption=caption, parse_mode="Markdown")
+
 # ==========================================
-# 9. INLINE BUTTON CALLBACK ROUTER
+# 9. INTERACTIVE ACTION ROUTING (Callbacks)
 # ==========================================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -409,6 +398,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if selected:
             text, markup = build_case_detail_ui(selected)
             await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
 
     elif data.startswith("refresh_"):
         case_id = data.split("_")[1]
@@ -418,40 +409,36 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             text, markup = build_case_detail_ui(selected)
             try:
                 await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+                await query.answer("🔄 Record refreshed dynamically!")
             except:
                 pass
 
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
+        await query.answer("⏳ Dispatching request to mark case completed...", show_alert=False)
+        
         success = await terminate_case_on_dashboard(case_id)
         if success:
-            await query.edit_message_text(f"✅ **Success!** Case `{case_id}` has been safely marked closed on the remote database.", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ **Success!** Case `{case_id}` has been closed and updated on the remote platform.", parse_mode="Markdown")
         else:
-            await query.edit_message_text(f"⚠️ **Update Validation Failed:** Tried to close Case `{case_id}` but server did not authorize execution.", parse_mode="Markdown")
+            # Fallback action path
+            await query.edit_message_text(
+                f"⚠️ **Server Update Failed:** Tried to complete Case `{case_id}` but could not confirm backend validation. Please check on-dashboard directly.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗂 Open Dashboard Portal", url="https://tech24et.com")]])
+            )
 
 # ==========================================
-# 10. BOT MENU INITIALIZER
-# ==========================================
-async def post_init(application: Application) -> None:
-    logger.info("Setting bot commands menu during system startup sequence...")
-    commands = [
-        BotCommand("start", "Initialize your session"),
-        BotCommand("pending", "View open/unresolved cases"),
-        BotCommand("terminate", "Access list of cases to terminate"),
-        BotCommand("report", "View structured Weekly summary report"),
-        BotCommand("monthly", "View structured Monthly summary report"),
-        BotCommand("export", "Generate and download database spreadsheet")
-    ]
-    await application.bot.set_my_commands(commands)
-
-# ==========================================
-# 11. ENGINE POLLING LOOP INITIALIZATION
+# 10. MAIN BOT ENTRY POINT
 # ==========================================
 def main():
+    # Start Keep-Alive background server
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # Initialize the core bot engine
+    application = Application.builder().token(BOT_TOKEN).build()
 
+    # Route bot commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
@@ -459,13 +446,10 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
     
+    # Route button inputs
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
-
-    logger.info("Production engine successfully deployed. Initiating polling loop hooks...")
+    logger.info("Bot starting up online polling loops...")
     application.run_polling()
 
 if __name__ == '__main__':
