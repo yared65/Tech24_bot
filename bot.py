@@ -3,10 +3,9 @@ import logging
 import asyncio
 import threading
 import urllib.parse
-import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # 1. ሎጊንግ ማስተካከያ (Logging)
@@ -19,31 +18,6 @@ logging.basicConfig(
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
-
-# 📂 የተላኩ ኬዞች ID እና ኖቲፊኬሽን የሚላክላቸውን ቻቶች ሴቭ ማድረጊያ ፋይሎች
-NOTIFIED_CASES_FILE = "notified_cases.json"
-CHATS_FILE = "registered_chats.json"
-
-# ሴቭ የተደረጉ ዳታዎችን ከፋይል ላይ መጫኛ ተግባራት
-def load_data(file_name, default_val):
-    if os.path.exists(file_name):
-        try:
-            with open(file_name, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            logging.error(f"Error loading {file_name}: {e}")
-    return default_val
-
-def save_data(file_name, data):
-    try:
-        with open(file_name, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logging.error(f"Error saving {file_name}: {e}")
-
-# ዳታዎችን በሜሞሪ መያዝ
-notified_cases = load_data(NOTIFIED_CASES_FILE, [])
-registered_chats = load_data(CHATS_FILE, [])
 
 # 3. Render እንዳይዘጋ የሚረዳው የጤና መፈተሻ ሰርቨር (Keep-Alive)
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -149,8 +123,7 @@ async def scrape_website_cases():
                     branch = extract_field(item, 'branch')
                     issue = extract_field(item, 'description') or extract_field(item, 'issue') or "No Description"
                     created_at = item.get('created_at', item.get('start_date', ''))
-                    date_str = str(created_at) if created_at else "N/A"
-                    comment = extract_field(item, 'comment') or extract_field(item, 'remark') or "No Comment"
+                    date_str = str(created_at)[:10] if created_at else "N/A"
                     
                     # Status መለየት
                     status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
@@ -163,8 +136,7 @@ async def scrape_website_cases():
                         'branch': branch if branch else "Adama Branch",
                         'issue': issue,
                         'status': status_text,
-                        'date': date_str,
-                        'comment': comment
+                        'date': date_str
                     })
 
             return scraped_cases, "OK"
@@ -211,7 +183,11 @@ async def test_api_call():
                 return "❌ API Connected, but returned unexpected format."
 
             total_scraped = len(cases_list)
+            
+            # Adama የሆኑትን በስማርት ሲስተም መቁጠር
             adama_count = sum(1 for item in cases_list if "adama" in str(item).lower())
+
+            # ለዲበጋንግ እንዲረዳ የመጀመሪያውን ዳታ ኪይ ማሳየት
             sample_keys = list(cases_list[0].keys()) if cases_list else []
 
             return (
@@ -225,81 +201,11 @@ async def test_api_call():
         except Exception as e:
             return f"❌ የቴክኒክ ስህተት አጋጥሟል፦\n{str(e)}"
 
-# 🔄 በየ 10 ደቂቃው ሮጦ አዳዲስ ኬዞችን ቼክ የሚያደርገው background Job
-async def check_new_cases(context: ContextTypes.DEFAULT_TYPE):
-    logging.info("Background job: Checking for new Adama cases...")
-    
-    global notified_cases, registered_chats
-    if not registered_chats:
-        logging.info("No chats registered yet. Skipping check.")
-        return
-
-    cases, status_msg = await scrape_website_cases()
-    if status_msg != "OK" or not cases:
-        return
-
-    # አዳዲስ ኬዞችን ብቻ መለየት (ከተመዘገቡት ID ውጭ የሆኑትን)
-    new_cases = [c for c in cases if c['case_id'] not in notified_cases]
-
-    if not new_cases:
-        logging.info("No new Adama cases found.")
-        return
-
-    logging.info(f"Found {len(new_cases)} new cases. Sending notifications...")
-
-    # አዲስ ኬዝ ሲገኝ ለእያንዳንዱ የተመዘገበ ቻት/ግሩፕ ኖቲፊኬሽን መላክ
-    for case in new_cases:
-        # ልክ በፎቶው ላይ እንዳለው ዓይነት የተዋበ ፎርማት
-        notification_text = (
-            f"⚠️ **ATM Incident Notification** ⚠️\n\n"
-            f"📄 **ID:** {case['case_id']},\n"
-            f"🏦 **Bank:** {case['bank']},\n"
-            f"⚠️ **Issue:** {case['issue']},\n"
-            f"🏢 **Branch:** {case['branch']},\n"
-            f"📍 **District:** {case['district']},\n"
-            f"💬 **Comment:** {case['comment']},\n"
-            f"🕒 **Reported at:** {case['date']}"
-        )
-
-        # "Open In tech24et.com dashboard" የሚለውን በተን ማዘጋጀት
-        keyboard = [
-            [InlineKeyboardButton("Open In tech24et.com dashboard ↗️", url="https://tech24et.com/")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        # ለሁሉም የተመዘገቡ ተጠቃሚዎች መላክ
-        for chat_id in registered_chats:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=notification_text,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-            except Exception as send_err:
-                logging.error(f"Failed to send notification to chat {chat_id}: {send_err}")
-
-        # ይህንን ID ድጋሚ እንዳይልከው ሴቭ ማድረግ
-        notified_cases.append(case['case_id'])
-
-    # የተላኩትን ID እና የቻት መረጃዎች በፋይል ላይ ማዘመን
-    save_data(NOTIFIED_CASES_FILE, notified_cases)
-
 # 6. የቴሌግራም ቦት ትዕዛዞች
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    global registered_chats
-
-    # ቻት አይዲው ከዚህ በፊት ካልተመዘገበ መመዝገብ
-    if chat_id not in registered_chats:
-        registered_chats.append(chat_id)
-        save_data(CHATS_FILE, registered_chats)
-        logging.info(f"New chat registered for notifications: {chat_id}")
-
     welcome_text = (
         "👋 እንኳን ወደ Tech24 Adama መከታተያ ቦት በሰላም መጡ!\n\n"
-        "🔔 ቦቱ በየ **10 ደቂቃው** በስተጀርባ አዳዲስ የ Adama ኬዞችን ቼክ ያደርጋል። አዲስ ኬዝ ሲገባ ወዲያውኑ ኖቲፊኬሽን ይልክልዎታል።\n\n"
-        "የሚከተሉትን ትዕዛዞች በፈለጉት ጊዜ መጠቀም ይችላሉ፦\n"
+        "የሚከተሉትን ትዕዛዞች ይጠቀሙ፦\n"
         "📋 /report - የAdama ኬዞች ሪፖርት ለማግኘት\n"
         "⏳ /pending - ያልተጠናቀቁ (Pending) ኬዞችን ብቻ ለማየት\n"
         "📊 /monthly - የወሩን ማጠቃለያ ሪፖርት ለማየት\n"
@@ -400,7 +306,6 @@ def main():
     server_thread.start()
 
     # የቴሌግራም ቦት መተግበሪያን መፍጠር
-    # 'job_queue'ን ለመጠቀም አዲሱን ስሪት እናስጀምራለን
     application = Application.builder().token(BOT_TOKEN).build()
 
     # ትዕዛዞችን ማገናኘት (Handlers)
@@ -409,12 +314,6 @@ def main():
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
-
-    # ⏳ በየ 10 ደቂቃው (600 ሰከንድ) የሚሮጠውን background job መመዝገብ
-    job_queue = application.job_queue
-    # የመጀመሪያው ቼክ ቦቱ በጀመረ በ 10ኛው ሰከንድ ላይ ይሮጣል፤ ከዚያ በየ 600 ሰከንዱ (10 ደቂቃ) ይደጋገማል
-    job_queue.run_repeating(check_new_cases, interval=600, first=10)
-    logging.info("Background Job Queue for checking new cases initialized (Interval: 10 mins).")
 
     # ቦቱን ስራ ማስጀመር
     logging.info("Bot is starting polling...")
