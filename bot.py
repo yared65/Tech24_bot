@@ -26,11 +26,11 @@ EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID") 
 
-# ቀደም ሲል የተላኩ ኬዞችን መመዝገቢያ (በየ 10 ደቂቃው ደጋግሞ ኖቲፊኬሽን እንዳይልክ ለመከላከል)
+# ቀደም ሲል የተላኩ ኬዞችን መመዝገቢያ (ደጋግሞ ኖቲፊኬሽን እንዳይልክ ለመከላከል)
 SENT_CASES_TRACKER = set()
 
 # ==========================================
-# 2. FLASK SERVER FOR UPTIME
+# 2. FLASK SERVER FOR UPTIME (RENDER)
 # ==========================================
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -46,7 +46,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. JSON PARSING HELPERS (CLEANER ENGINE)
+# 3. JSON PARSING HELPERS (CLEAN TEXTS)
 # ==========================================
 def safe_parse_json(val):
     if not val:
@@ -82,7 +82,7 @@ def extract_field(item, keyword):
     return ""
 
 # ==========================================
-# 4. API CONNECTIONS
+# 4. API SCRAPER & ACTION ENGINES
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -400,21 +400,9 @@ def generate_excel_bytes(cases):
     return buffer
 
 # ==========================================
-# 8. TELEGRAM COMMAND HANDLERS & English Menu Setter
+# 8. TELEGRAM COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 📌 ይህ ክፍል የቴሌግራም ሜኑን በግዳጅ ወደ እንግሊዝኛ እንዲቀይር ያደርገዋል
-    commands = [
-        BotCommand("start", "Initialize your session"),
-        BotCommand("pending", "View open/unresolved cases"),
-        BotCommand("terminate", "Access list of cases to terminate"),
-        BotCommand("report", "View structured Weekly summary report"),
-        BotCommand("monthly", "View structured Monthly summary report"),
-        BotCommand("export", "Generate and download database spreadsheet")
-    ]
-    # ለሁሉም ተጠቃሚዎች የሜኑ ትዕዛዞችን ወደ እንግሊዝኛ መቀየር
-    await context.bot.set_my_commands(commands)
-    
     welcome_text = (
         "👋 **Welcome to Tech24 Adama District Bot**\n\n"
         "💻 **Available Commands:**\n"
@@ -544,12 +532,33 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(f"❌ **Failed to terminate Case ID {case_id}.**\nDetail: {message}", parse_mode="Markdown")
 
 # ==========================================
-# 10. ENGINE INITIATION
+# 10. SYSTEM STARTUP MENU INITIALIZER (CRITICAL FIX)
+# ==========================================
+async def post_init(application: Application) -> None:
+    """
+    ይህ ፈንክሽን ቦቱ ልክ እንደበራ በጀርባው የቴሌግራም ሜኑዎችን በአስተማማኝ ሁኔታ 
+    ወደ እንግሊዝኛ የሚጭንበት ክፍል ነው።
+    """
+    logger.info("Setting bot commands menu to English during startup...")
+    commands = [
+        BotCommand("start", "Initialize your session"),
+        BotCommand("pending", "View open/unresolved cases"),
+        BotCommand("terminate", "Access list of cases to terminate"),
+        BotCommand("report", "View structured Weekly summary report"),
+        BotCommand("monthly", "View structured Monthly summary report"),
+        BotCommand("export", "Generate and download database spreadsheet")
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("English Menu commands loaded successfully!")
+
+# ==========================================
+# 11. ENGINE INITIATION
 # ==========================================
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # post_init ፈንክሽን እዚህ ላይ ተጭኗል
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     job_queue = application.job_queue
 
     # በየ 10 ደቂቃው ዳሽቦርዱን ቼክ እያደረገ የሚልክበት (Auto Polling)
