@@ -66,7 +66,6 @@ def safe_parse_json(val):
         return val
     try:
         if isinstance(val, str):
-            # Convert python dict string to valid JSON
             cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
             return json.loads(cleaned)
     except Exception:
@@ -74,9 +73,6 @@ def safe_parse_json(val):
     return {}
 
 def clean_extracted_value(data, key_hierarchy):
-    """
-    Recursively scans and extracts deep nested key names from raw dictionaries or stringified dicts.
-    """
     if not data:
         return ""
     
@@ -84,7 +80,6 @@ def clean_extracted_value(data, key_hierarchy):
     if not isinstance(parsed_data, dict):
         return str(parsed_data)
 
-    # Search list of candidate sub-keys
     for key in key_hierarchy:
         if key in parsed_data and parsed_data[key] is not None:
             val = parsed_data[key]
@@ -92,7 +87,6 @@ def clean_extracted_value(data, key_hierarchy):
                 return clean_extracted_value(val, key_hierarchy)
             return str(val)
             
-    # Fallback to general child object scans
     for k, v in parsed_data.items():
         if isinstance(v, (dict, str)):
             res = clean_extracted_value(v, key_hierarchy)
@@ -169,45 +163,43 @@ async def scrape_website_cases():
                     continue
                 
                 raw_string_dump = str(entry).lower()
-                # Filtering specifically for Adama scope
                 if "adama" in raw_string_dump:
                     case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
                     
-                    # 1. Bank Name Extraction (Fixed keys based on image)
                     bank = clean_extracted_value(entry.get('bank'), ['bankname', 'bank_name', 'name', 'title'])
                     if not bank:
                         bank = clean_extracted_value(entry, ['bankname', 'bank_name'])
                     if not bank or bank.isdigit():
                         bank = "Awash"
 
-                    # 2. Branch Name Extraction (Fixed keys based on image)
                     branch = clean_extracted_value(entry.get('branch'), ['branchname', 'branch_name', 'name', 'title'])
                     if not branch:
                         branch = clean_extracted_value(entry, ['branchname', 'branch_name'])
                     if not branch or branch.isdigit():
                         branch = "Adama Branch"
 
-                    # 3. Terminal/ATM Name Extraction
                     terminal = clean_extracted_value(entry.get('terminal'), ['atmterminal_name', 'atmterminal_no', 'terminal', 'name'])
                     if not terminal:
                         terminal = clean_extracted_value(entry, ['atmterminal_name', 'atmterminal_no', 'terminal'])
                     if not terminal or '{' in terminal:
                         terminal = "ATM_1"
 
-                    # 4. Issue Extraction (Fixed keys based on image)
                     raw_issue = entry.get('description') or entry.get('issue') or "ATM"
                     issue = clean_extracted_value(raw_issue, ['issuecatname', 'issuesubcatname', 'issuesubcat_name', 'issuecat_name', 'name', 'title'])
                     if not issue or '{' in issue:
                         issue = "ATM Issue"
 
-                    # 5. Technician Extraction
+                    # Robust Technician Name Extraction Fix
                     tech_data = entry.get('technician')
                     technician = "Not Assigned"
                     tech_phone = "N/A"
-                    if tech_data and isinstance(tech_data, dict):
-                        if 'callentry_id' not in tech_data:
+                    if tech_data:
+                        if isinstance(tech_data, dict):
                             technician = tech_data.get('name', tech_data.get('username', 'Not Assigned'))
                             tech_phone = tech_data.get('phone', 'N/A')
+                        elif isinstance(tech_data, str) and '{' in tech_data:
+                            technician = clean_extracted_value(tech_data, ['name', 'username'])
+                            tech_phone = clean_extracted_value(tech_data, ['phone'])
 
                     comment = entry.get('comment') or entry.get('description') or "No comments."
                     district = "Adama"
@@ -226,7 +218,6 @@ async def scrape_website_cases():
                             except Exception:
                                 date_obj = datetime.now()
 
-                    # 6. Status Extraction
                     status_raw = ""
                     for k in ['callentry_status', 'callentry_progress', 'status', 'progress']:
                         val = entry.get(k)
@@ -329,7 +320,6 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         return
 
     for case in new_pending_cases:
-        # Beautiful clean notification formatting matching Image 2
         notif_text = (
             f"⚡ *ATM Incident Notification* ⚡\n\n"
             f"📄 *ID:* {case['case_id']}\n"
@@ -386,27 +376,14 @@ def build_case_detail_ui(case):
 # ==========================================
 def format_summary_report(cases, days_limit=7, title="Weekly"):
     now = datetime.now()
-    filtered_cases = []
-    
-    if title == "Weekly":
-        # Dynamic filter from Monday (weekday 0) to Saturday (weekday 5) of the current week
-        today = now.date()
-        start_of_week = today - timedelta(days=today.weekday()) # Monday
-        end_of_week = start_of_week + timedelta(days=5) # Saturday
-        
-        for c in cases:
-            case_date = c['date_obj'].date()
-            if start_of_week <= case_date <= end_of_week:
-                filtered_cases.append(c)
-    else:
-        # 30 days limit fallback for Monthly Matrix
-        cutoff_date = now - timedelta(days=days_limit)
-        filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
+    # Optimized dynamic past days scope range selector to prevent empty sets
+    cutoff_date = now - timedelta(days=days_limit)
+    filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
 
     if not filtered_cases:
-        return f"📭 No cases recorded on dashboard for this {title} scope."
+        return f"📭 No cases recorded on dashboard for this {title} timeframe."
 
-    report_lines = [f"📋 *የAdama የቅርብ ጊዜ ኬዞች ሪፖርት ({title})* 📋\n"]
+    report_lines = [f"📋 *Adama District Latest Cases Report ({title})* 📋\n"]
 
     for idx, case in enumerate(filtered_cases, start=1):
         try:
@@ -424,8 +401,26 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
         )
         report_lines.append(case_string)
 
-    report_lines.append("\n*Generally Matrix*")
+    # Clean technician performance matrix builder matching requested format
+    report_lines.append("\n*Technician Performance Matrix*")
+    tech_analytics = {}
+    for case in filtered_cases:
+        tech_name = case['technician']
+        if not tech_name or tech_name == "Not Assigned":
+            continue
+        if tech_name not in tech_analytics:
+            tech_analytics[tech_name] = 0
+        if case['status'] == "Completed":
+            tech_analytics[tech_name] += 1
 
+    if tech_analytics:
+        for technician, count in tech_analytics.items():
+            report_lines.append(f"👤 Technician *{technician}* {count} case{'s' if count != 1 else ''} resolved")
+    else:
+        report_lines.append("No cases resolved by assigned technicians yet.")
+
+    # General Bank Breakdown Summary Analytics
+    report_lines.append("\n*General Bank Analytics*")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
@@ -509,7 +504,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ የAdama መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፤ እባክዎ ትንሽ ይጠብቁ...")
+    processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -540,7 +535,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ የAdama መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፤ እባክዎ ትንሽ ይጠብቁ...")
+    processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -552,7 +547,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ የAdama መረጃዎችን ከዌብሳይቱ ላይ እየፈለግኩ ነው፤ እባክዎ ትንሽ ይጠብቁ...")
+    processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -700,7 +695,6 @@ def main():
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
     job_queue = application.job_queue
-    # Checks pending issues every 10 minutes (600 seconds)
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
 
     application.run_polling()
