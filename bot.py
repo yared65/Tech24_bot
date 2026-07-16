@@ -57,7 +57,15 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST JSON FIELD EXTRACTORS
+# 3. MARKDOWN ESCAPING UTILITY
+# ==========================================
+def escape_md(text: str) -> str:
+    """Escape special characters for Telegram Markdown (non‑V2)."""
+    chars = "_*[]()~>#+-=|{}.!"
+    return ''.join(f'\\{ch}' if ch in chars else ch for ch in str(text))
+
+# ==========================================
+# 4. ROBUST JSON FIELD EXTRACTORS
 # ==========================================
 def safe_parse_json(val):
     if not val:
@@ -116,7 +124,7 @@ def get_relative_time(date_obj):
         return "just now", "now"
 
 # ==========================================
-# 4. API SCRAPER & TRANSACTION ENGINES
+# 5. API SCRAPER & TRANSACTION ENGINES
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -296,7 +304,7 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC 10-MINUTE PENDING MONITOR
+# 6. AUTOMATIC 10-MINUTE PENDING MONITOR
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
@@ -322,13 +330,13 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     for case in new_pending_cases:
         notif_text = (
             f"⚡ *ATM Incident Notification* ⚡\n\n"
-            f"📄 *ID:* {case['case_id']}\n"
-            f"🏦 *Bank:* {case['bank']}\n"
-            f"⚠️ *Issue:* {case['issue']}\n"
-            f"🏢 *Branch:* {case['branch']}\n"
-            f"📍 *District:* {case['district']}\n"
-            f"💬 *Comment:* {case['comment']}\n"
-            f"🕒 *Reported at:* {case['date_raw']}"
+            f"📄 *ID:* {escape_md(case['case_id'])}\n"
+            f"🏦 *Bank:* {escape_md(case['bank'])}\n"
+            f"⚠️ *Issue:* {escape_md(case['issue'])}\n"
+            f"🏢 *Branch:* {escape_md(case['branch'])}\n"
+            f"📍 *District:* {escape_md(case['district'])}\n"
+            f"💬 *Comment:* {escape_md(case['comment'])}\n"
+            f"🕒 *Reported at:* {escape_md(case['date_raw'])}"
         )
         
         kb = InlineKeyboardMarkup([
@@ -343,7 +351,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS
+# 7. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case['date_obj'])
@@ -372,11 +380,10 @@ def build_case_detail_ui(case):
     return text, InlineKeyboardMarkup(keyboard)
 
 # ==========================================
-# 7. EXCEL & REPORT ENGINE GENERATORS
+# 8. EXCEL & REPORT ENGINE GENERATORS
 # ==========================================
 def format_summary_report(cases, days_limit=7, title="Weekly"):
     now = datetime.now()
-    # Optimized dynamic past days scope range selector to prevent empty sets
     cutoff_date = now - timedelta(days=days_limit)
     filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
 
@@ -389,19 +396,18 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
         try:
             date_formatted = case['date_obj'].strftime("%d/%m/%Y")
         except Exception:
-            date_formatted = case['date_raw']
-            
+            date_formatted = escape_md(case['date_raw'])
+
         case_string = (
-            f"{idx}. ID: {case['case_id']}\n"
-            f"🏦 Bank: {case['bank']} ({case['branch']})\n"
-            f"⚠️ Issue: {case['issue']}\n"
-            f"📅 Date: {date_formatted}\n"
-            f"📌 Status: {'✅' if case['status'] == 'Completed' else '⏳'} {case['status']}\n"
+            f"{idx}. ID: {escape_md(case['case_id'])}\n"
+            f"🏦 Bank: {escape_md(case['bank'])} ({escape_md(case['branch'])})\n"
+            f"⚠️ Issue: {escape_md(case['issue'])}\n"
+            f"📅 Date: {escape_md(date_formatted)}\n"
+            f"📌 Status: {'✅' if case['status'] == 'Completed' else '⏳'} {escape_md(case['status'])}\n"
             f"----------------------------------------"
         )
         report_lines.append(case_string)
 
-    # Clean technician performance matrix builder matching requested format
     report_lines.append("\n*Technician Performance Matrix*")
     tech_analytics = {}
     for case in filtered_cases:
@@ -415,24 +421,27 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
 
     if tech_analytics:
         for technician, count in tech_analytics.items():
-            report_lines.append(f"👤 Technician *{technician}* {count} case{'s' if count != 1 else ''} resolved")
+            report_lines.append(
+                f"👤 Technician *{escape_md(technician)}* {count} case{'s' if count != 1 else ''} resolved"
+            )
     else:
         report_lines.append("No cases resolved by assigned technicians yet.")
 
-    # General Bank Breakdown Summary Analytics
     report_lines.append("\n*General Bank Analytics*")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
         if b_name not in bank_analytics:
             bank_analytics[b_name] = {"registered": 0, "completed": 0}
-        
         bank_analytics[b_name]["registered"] += 1
         if case['status'] == "Completed":
             bank_analytics[b_name]["completed"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        summary_line = f"🏛 *{bank_name}* Registered: {stats['registered']}  |  Completed: {stats['completed']}"
+        summary_line = (
+            f"🏛 *{escape_md(bank_name)}* "
+            f"Registered: {stats['registered']}  |  Completed: {stats['completed']}"
+        )
         report_lines.append(summary_line)
 
     return "\n".join(report_lines)
@@ -490,7 +499,7 @@ def generate_excel_bytes(cases):
     return output
 
 # ==========================================
-# 8. TELEGRAM COMMAND HANDLERS
+# 9. TELEGRAM COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
@@ -510,7 +519,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Connection Failure:*\n{status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Connection Failure:*\n{escape_md(status)}", parse_mode="Markdown")
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     if not pending_cases:
@@ -541,7 +550,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Error:* {escape_md(status)}", parse_mode="Markdown")
 
     report_text = format_summary_report(cases, days_limit=7, title="Weekly")
     await update.message.reply_text(report_text, parse_mode="Markdown")
@@ -553,7 +562,7 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Error:* {escape_md(status)}", parse_mode="Markdown")
 
     report_text = format_summary_report(cases, days_limit=30, title="Monthly")
     await update.message.reply_text(report_text, parse_mode="Markdown")
@@ -565,7 +574,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
     if status != "OK":
-        return await update.message.reply_text(f"❌ *Export Blocked:* {status}", parse_mode="Markdown")
+        return await update.message.reply_text(f"❌ *Export Blocked:* {escape_md(status)}", parse_mode="Markdown")
 
     if not cases:
         return await update.message.reply_text("❌ *Export Cancelled:* No cases matched query scope.", parse_mode="Markdown")
@@ -587,7 +596,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==========================================
-# 9. INLINE BUTTON CALLBACK HANDLER
+# 10. INLINE BUTTON CALLBACK HANDLER
 # ==========================================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -602,7 +611,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         case_id = data.split("_")[1]
         confirm_text = (
             f"⚠️ *Confirmation Required*\n\n"
-            f"Are you sure you want to terminate/close Case ID: *{case_id}*?"
+            f"Are you sure you want to terminate/close Case ID: *{escape_md(case_id)}*?"
         )
         confirm_keyboard = [
             [InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")],
@@ -618,18 +627,24 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("do_terminate_"):
         case_id = data.split("_")[2]
-        await query.edit_message_text(f"⏳ Attempting terminal closure for Case ID `{case_id}`...", parse_mode="Markdown")
+        await query.edit_message_text(
+            f"⏳ Attempting terminal closure for Case ID `{escape_md(case_id)}`...",
+            parse_mode="Markdown"
+        )
         
         success, err_msg = await terminate_case_on_dashboard(case_id)
         if success:
-            await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated.", parse_mode="Markdown")
+            await query.edit_message_text(
+                f"✅ *Success!* Case ID `{escape_md(case_id)}` marked as Terminated.",
+                parse_mode="Markdown"
+            )
         else:
             keyboard = [
                 [InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")],
                 [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
             ]
             await query.edit_message_text(
-                text=f"❌ *Termination failed:*\n`{err_msg}`",
+                text=f"❌ *Termination failed:*\n`{escape_md(err_msg)}`",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -639,7 +654,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         case_id = data.split("_")[1]
         cases, status = await scrape_website_cases()
         if status != "OK":
-            return await query.edit_message_text(f"❌ Scraper failure: {status}")
+            return await query.edit_message_text(f"❌ Scraper failure: {escape_md(status)}")
         
         target = next((c for c in cases if c['case_id'] == case_id), None)
         if not target:
@@ -652,7 +667,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         case_id = data.split("_")[2] if len(data.split("_")) == 3 else data.split("_")[1]
         cases, status = await scrape_website_cases()
         if status != "OK":
-            return await query.edit_message_text(f"❌ Scraper Sync Failed: {status}")
+            return await query.edit_message_text(f"❌ Scraper Sync Failed: {escape_md(status)}")
 
         target = next((c for c in cases if c['case_id'] == case_id), None)
         if not target:
@@ -662,7 +677,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. STARTUP MENU INITIALIZER
+# 11. STARTUP MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
@@ -675,7 +690,7 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(commands)
 
 # ==========================================
-# 11. ENGINE INITIATION
+# 12. ENGINE INITIATION
 # ==========================================
 def main():
     if not BOT_TOKEN:
