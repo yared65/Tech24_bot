@@ -1,4 +1,4 @@
-os
+import os
 import logging
 import asyncio
 import threading
@@ -40,7 +40,7 @@ else:
 SENT_CASES_TRACKER = set()
 
 # ==========================================
-# 2. FLASK SERVER FOR KEEPALIVE
+# 2. FLASK SERVER FOR KEEPALIVE (RENDER)
 # ==========================================
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -57,7 +57,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. HELPERS & TIME PARSERS
+# 3. ROBUST NESTED JSON PARSING HELPERS
 # ==========================================
 def safe_parse_json(val):
     if not val:
@@ -79,9 +79,9 @@ def extract_field(item, keyword):
         for k, v in item.items():
             if keyword.lower() in k.lower():
                 if isinstance(v, dict):
-                    return v.get('name', v.get('title', str(v)))
+                    return v.get('name', v.get('title', v.get('bankname', v.get('branchname', str(v)))))
                 return str(v)
-        for fallback in ['name', 'title', 'bank_name', 'branch_name']:
+        for fallback in ['name', 'title', 'bank_name', 'branch_name', 'bankname', 'branchname']:
             if fallback in item:
                 return str(item[fallback])
         return str(item)
@@ -96,7 +96,6 @@ def extract_field(item, keyword):
     return str(item)
 
 def get_relative_time(date_obj):
-    """Calculates both short-hand and descriptive relative times."""
     now = datetime.now()
     diff = now - date_obj
     seconds = diff.total_seconds()
@@ -124,7 +123,7 @@ def get_relative_time(date_obj):
     return long_str, short_str
 
 # ==========================================
-# 4. API SCRAPER
+# 4. API SCRAPER & TRANSACTION ENGINES
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -177,7 +176,13 @@ async def scrape_website_cases():
                     bank = extract_field(entry.get('bank'), 'bank') or extract_field(entry, 'bank')
                     branch = extract_field(entry.get('branch'), 'branch') or extract_field(entry, 'branch')
                     terminal = extract_field(entry.get('terminal'), 'terminal') or extract_field(entry, 'terminal')
-                    issue = entry.get('description') or entry.get('issue') or "N/A"
+                    
+                    # Clean issue from raw JSON
+                    raw_issue = entry.get('description') or entry.get('issue') or "N/A"
+                    issue = extract_field(raw_issue, 'issuecatname') or extract_field(raw_issue, 'name') or str(raw_issue)
+                    if not issue or issue.strip() == "{}" or "issuecatid" in issue:
+                        issue = "ATM"
+                    
                     technician = extract_field(entry.get('technician'), 'name') or extract_field(entry, 'technician')
                     tech_phone = extract_field(entry.get('technician'), 'phone') or "N/A"
                     comment = entry.get('comment') or "No comments."
@@ -256,11 +261,11 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC MONITOR & DYNAMIC ALERTS
+# 5. AUTOMATIC 10-MINUTE PENDING MONITOR
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
-        logger.warning("NOTIFICATION_CHAT_ID is missing! Auto-polling paused.")
+        logger.warning("NOTIFICATION_CHAT_ID variable is missing! Auto-polling paused.")
         return
 
     logger.info("Running scheduled 10-minute automated dashboard query...")
@@ -281,36 +286,35 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not new_pending_cases:
         return
 
-    if len(new_pending_cases) == 1:
-        case = new_pending_cases[0]
-        text, kb = build_case_detail_ui(case)
-        await context.bot.send_message(
-            chat_id=NOTIFICATION_CHAT_ID,
-            text=text,
-            reply_markup=kb
+    for case in new_pending_cases:
+        notif_text = (
+            f"*ATM Incident Notification*\n\n"
+            f"📄 *ID:* {case['case_id']},\n"
+            f"🏦 *Bank:* {case['bank']},\n"
+            f"⚠️ *Issue:* {case['issue']},\n"
+            f"🏢 *Branch:* {case['branch']},\n"
+            f"📍 *District:* {case['district']},\n"
+            f"💬 *Comment:* {case['comment']},\n"
+            f"🕒 *Reported at:* {case['date_raw']}"
         )
-    else:
-        text = "The following ATM cases have been reported and are currently pending action. select a case from the list below to view details and proceed with resolution."
-        keyboard = []
-        for case in new_pending_cases:
-            _, relative_short = get_relative_time(case['date_obj'])
-            button_label = f"{case['case_id']} | {case['bank']} | {case['branch']} | {relative_short}"
-            keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
-        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
+        
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Open In tech24et.com dashboard", url="https://tech24et.com/")]
+        ])
         
         await context.bot.send_message(
             chat_id=NOTIFICATION_CHAT_ID,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            text=notif_text,
+            reply_markup=kb,
+            parse_mode="Markdown"
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS (IMAGE MATCHED)
+# 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case['date_obj'])
     
-    # Exact plain-text formatting based on Image 6 & 7
     text = (
         f"Case ID: {case['case_id']}\n"
         f"Terminal: {case['terminal']}\n"
@@ -327,11 +331,10 @@ def build_case_detail_ui(case):
         f"Relative Time: {relative_long}"
     )
     
-    # Vertically stacked design
     keyboard = [
-        [InlineKeyboardButton("🛑 Terminate", callback_data=f"terminate_{case['case_id']}")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_{case['case_id']}")],
-        [InlineKeyboardButton("🚫 Cancel", callback_data="cancel_action")]
+        [InlineKeyboardButton("Terminate", callback_data=f"askterm_{case['case_id']}")],
+        [InlineKeyboardButton("Refresh", callback_data=f"refresh_{case['case_id']}")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -346,17 +349,21 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
     if not filtered_cases:
         return f"📭 No cases recorded on dashboard in the past {days_limit} days."
 
-    report_lines = [f"🏧 *{title} Report/yared Girma/*\n"]
+    report_lines = [f"📋 *{title} Report /yared Girma/* 📋\n"]
 
-    for case in filtered_cases:
+    for idx, case in enumerate(filtered_cases, start=1):
         try:
-            date_formatted = case['date_obj'].strftime("%d/%m/%Y")
+            date_formatted = case['date_obj'].strftime("%d/%m/%Y %I:%M %p")
         except Exception:
-            date_formatted = case['date_raw'][:10]
+            date_formatted = case['date_raw']
             
         case_string = (
-            f"®️ *{date_formatted}* Registered | {case['branch']} | "
-            f"{case['bank']} | ({case['issue']}) | {case['status']}"
+            f"{idx}. ID: {case['case_id']}\n"
+            f"🏦 Bank: {case['bank']} ({case['branch']})\n"
+            f"⚠️ Issue: {case['issue']}\n"
+            f"📅 Date: {date_formatted}\n"
+            f"📌 Status: {'✅' if case['status'] == 'Completed' else '⏳'} {case['status']}\n"
+            f"----------------------------------------"
         )
         report_lines.append(case_string)
 
@@ -373,7 +380,7 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
             bank_analytics[b_name]["completed"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed -{stats['completed']}"
+        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed - {stats['completed']}"
         report_lines.append(summary_line)
 
     return "\n".join(report_lines)
@@ -438,7 +445,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
         "💻 *Available Commands Menu:*\n"
         "• /pending - View currently open / unresolved cases\n"
-        "• /terminate - View pending cases to select & complete\n"
         "• /report - View weekly formatted summary report\n"
         "• /monthly - View monthly formatted summary report\n"
         "• /export - Download structured incident Excel spreadsheets"
@@ -446,7 +452,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Processing live dashboard query...")
+    processing = await update.message.reply_text("⏳ Searching for unresolved Adama cases...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -456,10 +462,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     if not pending_cases:
-        # Match "No Pending Cases" layout
         keyboard = [[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/")]]
         return await update.message.reply_text(
-            "no pending or ongoing cases in the Adama district. You can check the dashboard for confirmation or further details.",
+            "✅ All Adama cases are completed! No pending cases found. You can check the dashboard for confirmation.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -476,30 +481,8 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Requesting terminal targets...")
-    cases, status = await scrape_website_cases()
-    
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
-
-    if status != "OK":
-        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
-
-    pending_cases = [c for c in cases if c['status'] == "On going"]
-    if not pending_cases:
-        return await update.message.reply_text("✅ No active targets available for closure.", parse_mode="Markdown")
-
-    text = "🛑 *Select Case ID to terminate/complete:* "
-    keyboard = []
-    for c in pending_cases:
-        button_lbl = f"Case {c['case_id']} - {c['bank']} ({c['branch']})"
-        keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"terminate_{c['case_id']}")])
-    keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
-    
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Fetching dashboard Weekly records...")
+    processing = await update.message.reply_text("⏳ Fetching Adama records from the website, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -511,7 +494,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Fetching dashboard Monthly records...")
+    processing = await update.message.reply_text("⏳ Fetching Adama records from the website, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -563,6 +546,46 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
+    # User clicks "Terminate" -> Show Confirmation Screen
+    if data.startswith("askterm_"):
+        case_id = data.split("_")[1]
+        confirm_text = (
+            f"⚠️ *Confirmation Required*\n\n"
+            f"Are you sure you want to terminate/close Case ID: *{case_id}*?"
+        )
+        # Three requested options: go back, yes terminate, no cancel
+        confirm_keyboard = [
+            [InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")],
+            [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")],
+            [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action")]
+        ]
+        await query.edit_message_text(
+            text=confirm_text,
+            reply_markup=InlineKeyboardMarkup(confirm_keyboard),
+            parse_mode="Markdown"
+        )
+        return
+
+    # User confirms and clicks "Yes, Terminate"
+    if data.startswith("do_terminate_"):
+        case_id = data.split("_")[2]
+        await query.edit_message_text(f"⏳ Attempting terminal state authorization closure for Case ID `{case_id}`...", parse_mode="Markdown")
+        
+        success, err_msg = await terminate_case_on_dashboard(case_id)
+        if success:
+            await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated on active dashboard database.", parse_mode="Markdown")
+        else:
+            keyboard = [
+                [InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")],
+                [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
+            ]
+            await query.edit_message_text(
+                text=f"❌ *Auth/Session rejection during termination attempt:*\n`{err_msg}`",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        return
+
     if data.startswith("view_"):
         case_id = data.split("_")[1]
         cases, status = await scrape_website_cases()
@@ -589,22 +612,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
-    elif data.startswith("terminate_"):
-        case_id = data.split("_")[1]
-        await query.edit_message_text(f"⏳ Attempting terminal state authorization closure for Case ID `{case_id}`...", parse_mode="Markdown")
-        
-        success, err_msg = await terminate_case_on_dashboard(case_id)
-        if success:
-            await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated on active dashboard database.", parse_mode="Markdown")
-        else:
-            keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data=f"terminate_{case_id}")],
-                        [InlineKeyboardButton("🚫 Cancel", callback_data="cancel_action")]]
-            await query.edit_message_text(
-                text=f"❌ *Auth/Session rejection during termination attempt:*\n`{err_msg}`",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-
 # ==========================================
 # 10. STARTUP ENGLISH MENU INITIALIZER
 # ==========================================
@@ -613,7 +620,6 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Initialize bot profile"),
         BotCommand("pending", "View open and unresolved cases"),
-        BotCommand("terminate", "Access case termination actions"),
         BotCommand("report", "View weekly performance metrics"),
         BotCommand("monthly", "View monthly performance metrics"),
         BotCommand("export", "Generate incident logs Excel sheet")
@@ -635,7 +641,6 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
-    application.add_handler(CommandHandler("terminate", terminate_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
