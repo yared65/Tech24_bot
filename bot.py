@@ -2,17 +2,18 @@ import os
 import logging
 import asyncio
 import threading
-import urllib.parse
+import json
 from datetime import datetime, timedelta
 from io import BytesIO
 from flask import Flask
 import httpx
 import openpyxl
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ==========================================
-# 1. LOGGING SETUP
+# 1. LOGGING & CONFIGURATION
 # ==========================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -20,436 +21,563 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# 2. ENVIRONMENT VARIABLES
-# ==========================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
+NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID") 
+
+# ቀደም ሲል የተላኩ ኬዞችን መመዝገቢያ (በየ 10 ደቂቃው ደጋግሞ ኖቲፊኬሽን እንዳይልክ ለመከላከል)
+SENT_CASES_TRACKER = set()
 
 # ==========================================
-# 3. FLASK HEALTH-CHECK SERVER (For Uptime)
+# 2. FLASK SERVER FOR UPTIME (RENDER/UptimeRobot)
 # ==========================================
 app = Flask(__name__)
-# Suppress noisy Flask development logs
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 @app.route('/')
 def home():
-    return "Bot is alive and running!", 200
+    return "OK", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting Flask keep-alive server on port {port}...")
+    logger.info(f"Starting Flask server on port {port}...")
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 4. UTILITY DATA PARSERS
+# 3. JSON PARSING HELPERS (CLEANER ENGINE)
 # ==========================================
+def safe_parse_json(val):
+    if not val:
+        return {}
+    if isinstance(val, dict):
+        return val
+    try:
+        if isinstance(val, str):
+            cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
+            return json.loads(cleaned)
+    except Exception:
+        pass
+    return {}
+
 def extract_field(item, keyword):
-    """Safely extracts nested fields from complex API structures."""
-    if not isinstance(item, dict): 
+    """
+    JSON ጽሑፎችን ፈልቅቆ ንጹህ ስም ብቻ ያወጣል (ለምሳሌ፦ Awash, Oda Boqotu, ATM1)
+    """
+    parsed = safe_parse_json(item)
+    if not parsed:
+        if isinstance(item, str):
+            return item
         return ""
-    for k, v in item.items():
-        if k.lower() == keyword.lower():
-            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
-    for k, v in item.items():
+    
+    # Check directly for common key variations
+    for k, v in parsed.items():
+        if k.lower() in [keyword.lower(), f"{keyword.lower()}name", f"{keyword.lower()} _name"]:
+            if isinstance(v, dict):
+                return v.get('name', v.get('title', str(v)))
+            return str(v)
+            
+    # Fallback search if not found directly
+    for k, v in parsed.items():
         if keyword.lower() in k.lower():
-            return v.get('name', v.get('title', str(v))) if isinstance(v, dict) else str(v)
+            if isinstance(v, dict):
+                return v.get('name', v.get('title', str(v)))
+            return str(v)
     return ""
 
 # ==========================================
-# 5. DASHBOARD API SCRAPING & MUTATION
+# 4. API CONNECTIONS (SCRAPER & TERMINATE)
 # ==========================================
 async def scrape_website_cases():
-    """Authenticates and pulls active ATM cases from the tech24et dashboard."""
     if not EMAIL or not PASSWORD:
-        return [], "Configuration Error: Missing login credentials in Environment Variables."
+        return [], "Error: EMAIL or PASSWORD environment variables missing!"
 
-    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
-    login_url = 'https://api.tech24et.com/api/login'
-    api_url = 'https://api.tech24et.com/api/callentries?limit=200'
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
-    }
+    login_url = "https://api.tech24et.com/api/auth/login"
+    data_url = "https://api.tech24et.com/api/callentries"
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            # 1. Fetch CSRF token
-            await session.get(csrf_url)
-            xsrf_token = session.cookies.get("XSRF-TOKEN")
-            if xsrf_token: 
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+            payload = {"email": EMAIL, "password": PASSWORD}
+            login_res = await client.post(login_url, json=payload)
+            if login_res.status_code != 200:
+                return [], f"Login failed: {login_res.status_code}"
+            
+            token = ""
+            try:
+                token = login_res.json().get("token", login_res.json().get("access_token", ""))
+            except Exception:
+                pass
 
-            # 2. Login
-            login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
-            login_res = await session.post(login_url, json=login_payload)
-            if login_res.status_code not in [200, 201, 204]: 
-                return [], f"Login failed with status code {login_res.status_code}"
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
 
-            # 3. Fetch Case Entries
-            response = await session.get(api_url)
-            if response.status_code != 200: 
-                return [], f"Failed to fetch data. Status: {response.status_code}"
+            response = await client.get(data_url, headers=headers)
+            if response.status_code != 200:
+                return [], f"Failed data fetch: {response.status_code}"
 
-            data = response.json()
-            cases_list = data.get('data', []) if isinstance(data, dict) else data
+            raw_cases = response.json()
+            cleaned_cases = []
+            
+            for item in raw_cases:
+                # ንጹህ መረጃዎችን የመፍለቂያ ክፍል (ያለ JSON ዝርክርክ)
+                bank_name = extract_field(item.get("bank", ""), "bank") or extract_field(item.get("bank_id", ""), "name")
+                branch_name = extract_field(item.get("branch", ""), "branch") or extract_field(item.get("branch_id", ""), "name")
+                terminal_id = extract_field(item.get("terminal", ""), "atmterminal") or extract_field(item.get("terminal_id", ""), "name") or item.get("terminal_id", "")
+                issue_desc = extract_field(item.get("issue_description", ""), "issuecat") or item.get("issue_description") or item.get("Issue Descrp") or "No issue description"
+                technician = extract_field(item.get("assigned_to", ""), "user") or item.get("assigned_to_id", "Unassigned")
 
-            scraped_cases = []
-            for item in cases_list:
-                if not item or not isinstance(item, dict): 
-                    continue
+                created_at_str = item.get("created_at") or item.get("Creation Tim") or ""
+                parsed_date = None
+                if created_at_str:
+                    try:
+                        parsed_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                    except Exception:
+                        try:
+                            parsed_date = datetime.strptime(created_at_str, "%d/%m/%Y")
+                        except Exception:
+                            parsed_date = datetime.now()
+                else:
+                    parsed_date = datetime.now()
+
+                case_obj = {
+                    "case_id": str(item.get("id") or item.get("Case ID") or ""),
+                    "bank": bank_name if bank_name else "Unknown Bank",
+                    "branch": branch_name if branch_name else "Unknown Branch",
+                    "terminal": terminal_id if terminal_id else "Unknown Terminal",
+                    "issue": issue_desc,
+                    "status": item.get("status") or item.get("Resolution S") or "Pending",
+                    "comment": item.get("comment") or item.get("Notes/Comments") or "None",
+                    "technician": technician if technician else "Unassigned",
+                    "date_obj": parsed_date,
+                    "date": parsed_date.strftime("%d/%m/%Y %I:%M %p")
+                }
+                cleaned_cases.append(case_obj)
                 
-                # We filter specifically for 'adama' district cases
-                if "adama" in str(item).lower():
-                    status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
-                    status_text = "Completed" if status.lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
-                    
-                    scraped_cases.append({
-                        'case_id': str(item.get('callentry_id', item.get('id', 'N/A'))),
-                        'terminal': extract_field(item, 'terminal') or extract_field(item, 'atm_id') or "N/A",
-                        'bank': extract_field(item, 'bank') or "Awash",
-                        'branch': extract_field(item, 'branch') or "Adama Branch",
-                        'issue': extract_field(item, 'description') or extract_field(item, 'issue') or "No Description",
-                        'status': status_text,
-                        'district': "Adama",
-                        'atm_name': extract_field(item, 'atm_name') or extract_field(item, 'terminal') or "N/A",
-                        'comment': extract_field(item, 'comment') or extract_field(item, 'note') or "None",
-                        'technician': extract_field(item, 'technician') or extract_field(item, 'assigned_to') or "Unassigned",
-                        'tech_phone': extract_field(item, 'phone') or "N/A",
-                        'date': str(item.get('created_at', ''))[:19].replace('T', ' ')
-                    })
-            return scraped_cases, "OK"
+            return cleaned_cases, "OK"
         except Exception as e:
-            logger.error(f"Scraper encountered error: {str(e)}")
-            return [], f"Error: {str(e)}"
+            logger.error(f"Error in scraping: {e}")
+            return [], str(e)
 
 async def terminate_case_on_dashboard(case_id):
-    """Sends patch/close request to terminate/complete a specific case on the remote dashboard."""
-    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
-    login_url = 'https://api.tech24et.com/api/login'
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
-    }
-
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
+    async with httpx.AsyncClient(timeout=20.0) as client:
         try:
-            # Prepare session tokens
-            await session.get(csrf_url)
-            xsrf = session.cookies.get("XSRF-TOKEN")
-            if xsrf: 
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf)})
-                
-            # Log in to authorize session
-            login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
-            if login_res.status_code not in [200, 201, 204]:
-                return False
+            login_url = "https://api.tech24et.com/api/auth/login"
+            payload = {"email": EMAIL, "password": PASSWORD}
+            login_res = await client.post(login_url, json=payload)
             
-            # Re-verify XSRF to prevent session mismatches on the mutative endpoint
-            updated_xsrf = session.cookies.get("XSRF-TOKEN")
-            if updated_xsrf:
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(updated_xsrf)})
-                
-            res = await session.post(terminate_url, json={'status': 'completed'})
-            return res.status_code in [200, 201, 204]
-        except Exception as e:
-            logger.error(f"Failed to terminate Case {case_id}: {e}")
-            return False
-
-# ==========================================
-# 6. REPORT GENERATOR ENGINE
-# ==========================================
-async def build_formatted_report(title: str, days_filter: int = None) -> str:
-    """Generates a beautifully styled text report matching your precise format criteria."""
-    cases, status_msg = await scrape_website_cases()
-    if status_msg != "OK":
-        return f"❌ **Error generating report**: {status_msg}"
-        
-    if not cases:
-        return "⚠️ **No data records found on the dashboard for Adama District.**"
-
-    now = datetime.now()
-    filtered_cases = []
-    
-    for c in cases:
-        if days_filter:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            }
             try:
-                # Parse date string "YYYY-MM-DD HH:MM:SS"
-                case_date = datetime.strptime(c['date'].split(" ")[0], "%Y-%m-%d")
-                if (now - case_date).days > days_filter:
-                    continue
-            except Exception as e:
-                logger.warning(f"Could not parse date {c['date']}: {e}")
+                token = login_res.json().get("token", login_res.json().get("access_token", ""))
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+            except Exception:
                 pass
-        filtered_cases.append(c)
 
-    if not filtered_cases:
-        return f"⚠️ **No registered cases matching the {title.lower()} timeline filter.**"
+            response = await client.post(terminate_url, json={"status": "Completed"}, headers=headers)
+            if response.status_code in [200, 201, 204]:
+                return True, "Successfully terminated."
+            return False, f"Error code: {response.status_code}"
+        except Exception as e:
+            return False, str(e)
 
-    # Determine lead tech or fall back dynamically
-    technician_name = "Adama Tech Team"
-    for c in filtered_cases:
-        if c['technician'] != "Unassigned" and c['technician'] != "":
-            technician_name = c['technician']
-            break
+# ==========================================
+# 5. AUTOMATIC 10-MINUTE PENDING MONITOR & NOTIFIER
+# ==========================================
+async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
+    """
+    በየ 10 ደቂቃው ዳሽቦርዱን ቼክ በማድረግ Pending ኬዝ ሲያገኝ ብቻ የሚልክበት ክፍል
+    """
+    if not NOTIFICATION_CHAT_ID:
+        logger.warning("NOTIFICATION_CHAT_ID is not configured!")
+        return
+        
+    logger.info("Auto-monitoring check started...")
+    cases, status = await scrape_website_cases()
+    if status != "OK":
+        logger.error(f"Scrape failed during auto-monitor: {status}")
+        return
 
-    # Build Header
-    lines = [f"🏧 {title} report /{technician_name}/\n"]
-
-    # Statistics aggregation
-    stats = {}
+    # Pending የሆኑ ኬዞችን ብቻ መለየት
+    pending = [c for c in cases if c['status'].lower() not in ["completed", "terminated", "resolved"]]
     
-    # Process each case entry line by line
-    for c in filtered_cases:
-        # Standardize date output format to DD/MM/YYYY
-        display_date = c['date'].split(" ")[0]
-        try:
-            dt = datetime.strptime(display_date, "%Y-%m-%d")
-            display_date = dt.strftime("%d/%m/%Y")
-        except:
-            pass
+    if not pending:
+        logger.info("No pending cases found during check.")
+        return
 
-        # Build detailed line
-        line_item = f"®️{display_date} Registered | {c['branch']} | {c['bank']} | ({c['issue']}) | {c['status']}"
-        lines.append(line_item)
+    # ሁኔታ 1፦ አንድ Pending ኬዝ ብቻ ሲኖር (ልክ እንደ ሁለተኛው ፎቶ ፎርማት ይልካል)
+    if len(pending) == 1:
+        case = pending[0]
+        if case['case_id'] not in SENT_CASES_TRACKER:
+            text = (
+                f"📋 **Case ID Details: {case['case_id']}**\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🏛 **Bank:** {case['bank']}\n"
+                f"📍 **Branch:** {case['branch']}\n"
+                f"🖥 **Terminal:** {case['terminal']}\n"
+                f"⚠️ **Issue:** {case['issue']}\n"
+                f"🔴 **Status:** {case['status']}\n"
+                f"👤 **Technician Assigned:** {case['technician']}\n"
+                f"📅 **Logged Time:** {case['date']} (EAT)"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"term_{case['case_id']}")]
+            ]
+            try:
+                await context.bot.send_message(
+                    chat_id=NOTIFICATION_CHAT_ID,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+                SENT_CASES_TRACKER.add(case['case_id'])
+            except Exception as e:
+                logger.error(f"Failed sending single case alert: {e}")
 
-        # Statistics math
-        bank = c['bank'].strip()
-        if bank not in stats:
-            stats[bank] = {"registered": 0, "completed": 0}
+    # ሁኔታ 2፦ ሁለት እና ከዚያ በላይ ኬዝ ሲኖር (ልክ እንደ ሦስተኛው ፎቶ በአዝራር ዝርዝር ብቻ ይልካል)
+    else:
+        # አዲስ ኬዞች መኖራቸውን ማረጋገጫ (ቢያንስ አንዱ ካልተላከ ለመላክ)
+        new_cases_found = any(c['case_id'] not in SENT_CASES_TRACKER for c in pending)
+        if new_cases_found:
+            text = "⚠️ **Multiple Pending ATM cases have been reported.** Select a case below to view details or proceed with resolution:"
+            keyboard = []
+            for case in pending[:15]:
+                # አዝራሮቹ የ Case ID፣ Bank እና Branch መረጃዎችን ይይዛሉ
+                button_label = f"{case['case_id']} | {case['bank']} | {case['branch']}"
+                keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
+                SENT_CASES_TRACKER.add(case['case_id'])  # ኖቲፊኬሽን እንደተላከ ምልክት ማድረግ
             
-        stats[bank]["registered"] += 1
-        if c['status'] == "Completed":
-            stats[bank]["completed"] += 1
-
-    # Build summary section
-    lines.append("\n       Generally \n")
-    for bank_name, data in stats.items():
-        lines.append(f" 🏛 {bank_name} Registered ")
-        lines.append(f"           Completed - {data['completed']}")
-        pending = data['registered'] - data['completed']
-        if pending > 0:
-            lines.append(f"           Pending - {pending}")
-
-    return "\n".join(lines)
+            try:
+                await context.bot.send_message(
+                    chat_id=NOTIFICATION_CHAT_ID,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Failed sending multiple cases alert: {e}")
 
 # ==========================================
-# 7. TELEGRAM COMPONENT & INTERACTION UI
+# 6. MANUAL DYNAMIC UI DISPLAY FOR /PENDING
 # ==========================================
-def build_case_detail_ui(case):
-    """Crafts standard structured clean UI output cards for interactive cases."""
-    text = (
-        f"📋 **Case ID Details:** {case['case_id']}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🏦 **Bank:** {case['bank']}\n"
-        f"🏛 **Branch:** {case['branch']}\n"
-        f"📟 **Terminal:** {case['terminal']} (Name: {case['atm_name']})\n"
-        f"🚨 **Issue Details:** {case['issue']}\n"
-        f"⚙️ **District:** {case['district']}\n"
-        f"🛡 **Status:** {case['status']}\n"
-        f"💬 **Comments:** {case['comment']}\n"
-        f"👤 **Tech Assigned:** {case['technician']} ({case['tech_phone']})\n"
-        f"⏰ **Logged Time:** {case['date']} (EAT)\n"
-    )
-    keyboard = [
-        [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"terminate_{case['case_id']}")],
-        [InlineKeyboardButton("🔄 Refresh Details", callback_data=f"refresh_{case['case_id']}")],
-        [InlineKeyboardButton("❌ Close Card", callback_data="cancel_action")]
+async def send_pending_cases_ui(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    cases, status = await scrape_website_cases()
+    if status != "OK":
+        return await context.bot.send_message(chat_id=chat_id, text=f"❌ Error: {status}")
+
+    pending = [c for c in cases if c['status'].lower() not in ["completed", "terminated", "resolved"]]
+    
+    if not pending:
+        return await context.bot.send_message(chat_id=chat_id, text="✨ No actions needed. All logged issues are completed.")
+
+    # ሁኔታ 1፦ አንድ ኬዝ ብቻ ሲኖር (2ኛው ፎቶ ፎርማት)
+    if len(pending) == 1:
+        case = pending[0]
+        text = (
+            f"📋 **Case ID Details: {case['case_id']}**\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🏛 **Bank:** {case['bank']}\n"
+            f"📍 **Branch:** {case['branch']}\n"
+            f"🖥 **Terminal:** {case['terminal']}\n"
+            f"⚠️ **Issue:** {case['issue']}\n"
+            f"🔴 **Status:** {case['status']}\n"
+            f"👤 **Technician Assigned:** {case['technician']}\n"
+            f"📅 **Logged Time:** {case['date']} (EAT)"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"term_{case['case_id']}")],
+            [InlineKeyboardButton("🔄 Refresh Details", callback_data="refresh_pending")]
+        ]
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    # ሁኔታ 2፦ ሁለት እና ከዚያ በላይ ኬዝ ሲኖር (3ኛው ፎቶ ፎርማት)
+    else:
+        text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details and proceed with resolution."
+        keyboard = []
+        for case in pending[:15]:
+            button_label = f"{case['case_id']} | {case['bank']} | {case['branch']}"
+            keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="refresh_pending")])
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ==========================================
+# 7. EXCEL & REPORT ENGINES
+# ==========================================
+def format_summary_report(cases, days_limit=7, is_weekly=True):
+    now = datetime.now()
+    cutoff_date = now - timedelta(days=days_limit)
+    filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
+    
+    title = f"Weekly report/yared Girma/" if is_weekly else "Monthly report/yared Girma/"
+    if not filtered_cases:
+        return f"📊 **{title}**\n\nNo records found for this period."
+
+    filtered_cases.sort(key=lambda x: x['date_obj'])
+    
+    report_lines = []
+    report_lines.append(title)
+    report_lines.append("")
+
+    bank_stats = {}
+
+    for case in filtered_cases:
+        date_str = case['date'].split(" ")[0]
+        branch = case['branch']
+        bank = case['bank']
+        issue = case['issue']
+        status = case['status']
+        
+        line = f"®{date_str} Registered |{branch} Branch |{bank}({issue} |{status}"
+        report_lines.append(line)
+        report_lines.append("")
+        
+        if bank not in bank_stats:
+            bank_stats[bank] = {"registered": 0, "completed": 0}
+        
+        bank_stats[bank]["registered"] += 1
+        if status.lower() in ["completed", "terminated", "resolved"]:
+            bank_stats[bank]["completed"] += 1
+
+    report_lines.append("     Generally ")
+    report_lines.append("")
+    
+    for bank, stats in bank_stats.items():
+        clean_bank_name = bank.replace(" Bank", "").replace(" bank", "").strip()
+        report_lines.append(f"{clean_bank_name} Registered {stats['registered']}")
+        report_lines.append(f"          Completed -{stats['completed']}")
+
+    return "\n".join(report_lines)
+
+def generate_excel_bytes(cases):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ATM Incident Log"
+    ws.views.sheetView[0].showGridLines = True
+    
+    headers = [
+        "Case ID", "Bank", "Branch", "Terminal ID", 
+        "Issue Description", "Resolution Status", "Creation Date", "Notes/Comments"
     ]
-    return text, InlineKeyboardMarkup(keyboard)
+    ws.append(headers)
+    
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9')
+    )
+    
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    
+    for case in cases:
+        row_data = [
+            case.get("case_id", ""),
+            case.get("bank", ""),
+            case.get("branch", ""),
+            case.get("terminal", ""),
+            case.get("issue", ""),
+            case.get("status", ""),
+            case.get("date", "").split(" ")[0],
+            case.get("comment", "")
+        ]
+        ws.append(row_data)
+        
+    for row in range(2, ws.max_row + 1):
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.font = Font(name="Calibri", size=10)
+            cell.border = thin_border
+            if col in [1, 4, 6, 7]:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+        
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 # ==========================================
-# 8. COMMAND HANDLERS
+# 8. TELEGRAM COMMAND HANDLERS (ENGLISH UI)
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    commands = [
+        BotCommand("start", "Initialize your session"),
+        BotCommand("pending", "View open/unresolved cases"),
+        BotCommand("terminate", "Access list of cases to terminate"),
+        BotCommand("report", "View structured Weekly summary report"),
+        BotCommand("monthly", "View structured Monthly summary report"),
+        BotCommand("export", "Generate and download database spreadsheet")
+    ]
+    await context.bot.set_my_commands(commands)
+    
     welcome_text = (
         "👋 **Welcome to Tech24 Adama District Bot**\n\n"
         "💻 **Available Commands:**\n"
-        "• /pending   - View all current open/unresolved cases\n"
-        "• /terminate - Access list of cases to quickly terminate/complete\n"
-        "• /report    - View structured Weekly summary report\n"
-        "• /monthly   - View structured Monthly summary report\n"
-        "• /export    - Generate and download spreadsheet raw database dump"
+        "• `/pending` - View all current open/unresolved cases\n"
+        "• `/terminate` - Access list of cases to quickly terminate/complete\n"
+        "• `/report` - View structured Weekly summary report\n"
+        "• `/monthly` - View structured Monthly summary report\n"
+        "• `/export` - Generate and download spreadsheet raw database dump"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cases, status_msg = await scrape_website_cases()
-    if status_msg != "OK": 
-        return await update.message.reply_text(f"❌ **Connection Error**: {status_msg}", parse_mode="Markdown")
-
-    pending_cases = [c for c in cases if c['status'] == "Pending"]
-
-    if not pending_cases:
-        keyboard = [[InlineKeyboardButton("🗂 Access Live Dashboard ↗️", url="https://tech24et.com")]]
-        await update.message.reply_text(
-            "✅ **All clear!** No pending or ongoing cases found in **Adama District**.",
-            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
-    if len(pending_cases) == 1:
-        text, markup = build_case_detail_ui(pending_cases[0])
-        await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        keyboard = []
-        for case in pending_cases:
-            btn_text = f"⏳ {case['case_id']} | {case['bank']} - {case['branch']}"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"show_{case['case_id']}")])
-        
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-        await update.message.reply_text(
-            "⏳ **Pending ATM Cases:**\nSelect any open case entry below to view logs or finalize termination on the server:",
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-        )
+    processing = await update.message.reply_text("⏳ Processing dashboard query...")
+    await send_pending_cases_ui(update.effective_chat.id, context)
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
 async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cases, status_msg = await scrape_website_cases()
-    if status_msg != "OK": 
-        return await update.message.reply_text(f"❌ **API Error**: Could not retrieve entries.", parse_mode="Markdown")
-        
-    pending_cases = [c for c in cases if c['status'] == "Pending"]
-    if not pending_cases:
-        return await update.message.reply_text("✨ **No actions needed.** All logged issues are completed.", parse_mode="Markdown")
+    processing = await update.message.reply_text("⏳ Fetching cases to terminate...")
+    cases, status = await scrape_website_cases()
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+
+    if status != "OK":
+        return await update.message.reply_text(f"❌ Error: {status}")
+
+    pending = [c for c in cases if c['status'].lower() not in ["completed", "terminated", "resolved"]]
+    if not pending:
+        return await update.message.reply_text("✨ No actions needed. All logged issues are completed.")
 
     keyboard = []
-    for case in pending_cases:
-        btn_text = f"🛑 Complete Case {case['case_id']} ({case['bank']})"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"terminate_{case['case_id']}")])
-    
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+    for case in pending[:15]:
+        button_label = f"ID: {case['case_id']} | {case['bank']} ({case['branch']})"
+        keyboard.append([InlineKeyboardButton(button_label, callback_data=f"term_{case['case_id']}")])
+
     await update.message.reply_text(
-        "🛠 **Termination Action Center:**\nChoose a case entry below to mark as completed directly on the Tech24 dashboard:",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        "Select a case from the list below to **Terminate** (mark as completed):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proc = await update.message.reply_text("⏳ Processing Weekly Case Summary...")
-    report_text = await build_formatted_report("Weekly", days_filter=7)
-    await proc.delete()
+    processing = await update.message.reply_text("⏳ Generating Weekly Report...")
+    cases, status = await scrape_website_cases()
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+
+    if status != "OK":
+        return await update.message.reply_text(f"❌ Error: {status}")
+
+    report_text = format_summary_report(cases, days_limit=7, is_weekly=True)
     await update.message.reply_text(report_text)
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proc = await update.message.reply_text("⏳ Processing Monthly Case Summary...")
-    report_text = await build_formatted_report("Monthly", days_filter=30)
-    await proc.delete()
+    processing = await update.message.reply_text("⏳ Generating Monthly Report...")
+    cases, status = await scrape_website_cases()
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+
+    if status != "OK":
+        return await update.message.reply_text(f"❌ Error: {status}")
+
+    report_text = format_summary_report(cases, days_limit=30, is_weekly=False)
     await update.message.reply_text(report_text)
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proc = await update.message.reply_text("⏳ Compiling data logs & creating Excel workbook...")
+    processing = await update.message.reply_text("⏳ Exporting Clean Spreadsheet...")
     cases, status = await scrape_website_cases()
-    
-    if not cases:
-        return await proc.edit_text("❌ Data compilation returned empty database.", parse_mode="Markdown")
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "ATM Incident Log"
-    
-    headers = ["Case ID", "Bank", "Branch", "Terminal ID", "Issue Description", "Resolution Status", "Assigned Technician", "Creation Timestamp", "Notes/Comments"]
-    ws.append(headers)
-    
-    for c in cases:
-        ws.append([c['case_id'], c['bank'], c['branch'], c['terminal'], c['issue'], c['status'], c['technician'], c['date'], c['comment']])
+    if status != "OK":
+        return await update.message.reply_text(f"❌ Error: {status}")
 
-    excel_file = BytesIO()
-    wb.save(excel_file)
-    excel_file.seek(0)
-    
-    now_label = datetime.now().strftime("%B %Y")
+    excel_file = generate_excel_bytes(cases)
     filename = f"atm-case-report-{datetime.now().strftime('%Y-%b').lower()}.xlsx"
     
-    caption = (
-        f"📊 **ATM Case Log Export**\n"
-        f"📅 **Reporting Period:** {now_label}\n\n"
-        "Automated administrative worksheet showing full issue records, down-times, and engineering logs."
+    await update.message.reply_document(
+        document=excel_file,
+        filename=filename,
+        caption="📊 **ATM Case Log Export**\n📅 **Reporting Period:** Clean Database Dump"
     )
 
-    await proc.delete()
-    await update.message.reply_document(document=excel_file, filename=filename, caption=caption, parse_mode="Markdown")
-
 # ==========================================
-# 9. INTERACTIVE ACTION ROUTING (Callbacks)
+# 9. INLINE BUTTON CALLBACK HANDLER
 # ==========================================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "cancel_action":
-        await query.message.delete()
+    if data == "refresh_pending":
+        await query.delete_message()
+        await send_pending_cases_ui(update.effective_chat.id, context)
         return
 
-    if data.startswith("show_"):
+    if data.startswith("view_"):
         case_id = data.split("_")[1]
-        cases, _ = await scrape_website_cases()
-        selected = next((c for c in cases if c['case_id'] == case_id), None)
-        if selected:
-            text, markup = build_case_detail_ui(selected)
-            await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
-        else:
-            await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ Error refreshing: {status}")
+            
+        case = next((c for c in cases if c['case_id'] == case_id), None)
+        if not case:
+            return await query.edit_message_text("❌ Case details not found.")
 
-    elif data.startswith("refresh_"):
-        case_id = data.split("_")[1]
-        cases, _ = await scrape_website_cases()
-        selected = next((c for c in cases if c['case_id'] == case_id), None)
-        if selected:
-            text, markup = build_case_detail_ui(selected)
-            try:
-                await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
-                await query.answer("🔄 Record refreshed dynamically!")
-            except:
-                pass
+        # አንድ ኬዝ ሲሆን የሚወጣበት (2ኛው ፎቶ ፎርማት)
+        text = (
+            f"📋 **Case ID Details: {case['case_id']}**\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🏛 **Bank:** {case['bank']}\n"
+            f"📍 **Branch:** {case['branch']}\n"
+            f"🖥 **Terminal:** {case['terminal']}\n"
+            f"⚠️ **Issue:** {case['issue']}\n"
+            f"🔴 **Status:** {case['status']}\n"
+            f"👤 **Technician Assigned:** {case['technician']}\n"
+            f"📅 **Logged Time:** {case['date']} (EAT)"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🛑 Terminate Case", callback_data=f"term_{case['case_id']}")],
+            [InlineKeyboardButton("🔙 Back to List", callback_data="refresh_pending")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    elif data.startswith("terminate_"):
+    elif data.startswith("term_"):
         case_id = data.split("_")[1]
-        await query.answer("⏳ Dispatching request to mark case completed...", show_alert=False)
+        await query.edit_message_text(f"⏳ Processing termination request for Case ID: `{case_id}`...", parse_mode="Markdown")
         
-        success = await terminate_case_on_dashboard(case_id)
+        success, message = await terminate_case_on_dashboard(case_id)
         if success:
-            await query.edit_message_text(f"✅ **Success!** Case `{case_id}` has been closed and updated on the remote platform.", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ **Case ID {case_id} Successfully Terminated!**", parse_mode="Markdown")
         else:
-            # Fallback action path
-            await query.edit_message_text(
-                f"⚠️ **Server Update Failed:** Tried to complete Case `{case_id}` but could not confirm backend validation. Please check on-dashboard directly.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗂 Open Dashboard Portal", url="https://tech24et.com")]])
-            )
+            await query.edit_message_text(f"❌ **Failed to terminate Case ID {case_id}.**\nDetail: {message}", parse_mode="Markdown")
 
 # ==========================================
-# 10. MAIN BOT ENTRY POINT
+# 10. ENGINE INITIATION
 # ==========================================
 def main():
-    # Start Keep-Alive background server
+    # Flaskን በጀርባ ማስጀመር (ለUptime)
     threading.Thread(target=run_health_server, daemon=True).start()
-    
-    # Initialize the core bot engine
-    application = Application.builder().token(BOT_TOKEN).build()
 
-    # Route bot commands
+    application = Application.builder().token(BOT_TOKEN).build()
+    job_queue = application.job_queue
+
+    # 1. በየ 10 ደቂቃው (600 ሰከንድ) ዳሽቦርዱን ቼክ እያደረገ አዲስ Pendings የሚልክበት Background Job
+    job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
+
+    # 2. የአዝራርና የኮማንድ መቆጣጠሪያዎች
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
-    
-    # Route button inputs
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    logger.info("Bot starting up online polling loops...")
     application.run_polling()
 
 if __name__ == '__main__':
