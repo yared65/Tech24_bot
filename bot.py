@@ -5,6 +5,7 @@ import threading
 import urllib.parse
 import ast
 import json
+import re
 from datetime import datetime, timedelta
 from io import BytesIO
 from flask import Flask
@@ -84,10 +85,10 @@ def extract_field(item, keyword):
     return str(val)
 
 # ==========================================
-# 5. DASHBOARD API SCRAPING & MUTATION (FIXED)
+# 5. DASHBOARD API SCRAPING & MUTATION (STRICT SESSION FIX)
 # ==========================================
 async def scrape_website_cases():
-    """Authenticates using stateful cookies and pulls active ATM cases for Adama."""
+    """Authenticates using stateful manual cookie parsing to prevent 419 CSRF errors."""
     if not EMAIL or not PASSWORD:
         return [], "Configuration Error: Missing login credentials in Environment Variables."
 
@@ -95,55 +96,73 @@ async def scrape_website_cases():
     login_url = 'https://api.tech24et.com/api/login'
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
     
-    # Strictly structured headers mimicking stateful Sanctum requirements
+    # Strict web-browser simulation headers
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest', # CRITICAL: Tells Laravel this is an AJAX/API request
         'Origin': 'https://tech24et.com',
         'Referer': 'https://tech24et.com/',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'Accept-Language': 'en-US,en;q=0.9',
     }
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # Step 1: Request CSRF Cookie
+            # Step 1: Fetch the CSRF Cookie
             csrf_res = await session.get(csrf_url)
             
-            # Step 2: Manually locate the XSRF Token from cookie jar
-            xsrf_token = session.cookies.get("XSRF-TOKEN")
+            # Manually extract cookies from response headers to bypass client-side domain limitations
+            cookies_dict = {}
+            for header, val in csrf_res.headers.multi_items():
+                if header.lower() == 'set-cookie':
+                    cookie_parts = val.split(';')[0].split('=', 1)
+                    if len(cookie_parts) == 2:
+                        cookies_dict[cookie_parts[0].strip()] = cookie_parts[1].strip()
+
+            xsrf_token = cookies_dict.get("XSRF-TOKEN")
             if not xsrf_token:
-                for cookie_name, cookie_val in session.cookies.items():
-                    if cookie_name.upper() == 'XSRF-TOKEN':
-                        xsrf_token = cookie_val
-                        break
+                # Fallback to standard cookie jar if manual extract yielded nothing
+                xsrf_token = session.cookies.get("XSRF-TOKEN")
 
             if not xsrf_token:
-                return [], "CSRF initialization failed: Token not provided by server."
+                return [], "CSRF Token could not be initialized from the platform."
 
-            # Step 3: Inject the verified token into the active headers
+            # Step 2: Set XSRF Headers and include gathered cookies
             decoded_token = urllib.parse.unquote(xsrf_token)
             session.headers.update({
                 'X-XSRF-TOKEN': decoded_token,
-                'X-CSRF-TOKEN': decoded_token
+                'X-CSRF-TOKEN': decoded_token,
+                'Cookie': "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
             })
 
-            # Step 4: Login attempt
+            # Step 3: Perform Login
             login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
             login_res = await session.post(login_url, json=login_payload)
             
             if login_res.status_code not in [200, 201, 204]: 
                 return [], f"Login failed with status {login_res.status_code}"
 
-            # Step 5: Refresh token headers in case a new session token was issues on success
-            updated_xsrf = session.cookies.get("XSRF-TOKEN")
-            if updated_xsrf:
-                session.headers.update({
-                    'X-XSRF-TOKEN': urllib.parse.unquote(updated_xsrf),
-                    'X-CSRF-TOKEN': urllib.parse.unquote(updated_xsrf)
-                })
+            # Step 4: Refresh cookies list with the authenticated Session token
+            for header, val in login_res.headers.multi_items():
+                if header.lower() == 'set-cookie':
+                    cookie_parts = val.split(';')[0].split('=', 1)
+                    if len(cookie_parts) == 2:
+                        cookies_dict[cookie_parts[0].strip()] = cookie_parts[1].strip()
 
-            # Step 6: Query entries
+            # Apply refreshed cookies & potential updated tokens
+            if cookies_dict.get("XSRF-TOKEN"):
+                decoded_updated = urllib.parse.unquote(cookies_dict["XSRF-TOKEN"])
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_updated,
+                    'X-CSRF-TOKEN': decoded_updated
+                })
+            
+            session.headers.update({
+                'Cookie': "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+            })
+
+            # Step 5: Query Case Entries
             response = await session.get(api_url)
             if response.status_code != 200: 
                 return [], f"Failed to fetch data. Status: {response.status_code}"
@@ -156,7 +175,7 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict): 
                     continue
                 
-                # Strict check for 'adama' while bypassing 'adama district' as requested
+                # Strict check for 'adama' while bypassing 'adama district'
                 item_str = str(item).lower()
                 if "adama" in item_str and "adama district" not in item_str:
                     status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
@@ -182,7 +201,7 @@ async def scrape_website_cases():
             return [], f"Error: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
-    """Sends patch/close request to complete a specific case on the remote dashboard."""
+    """Sends patch/close request to complete a specific case on the remote dashboard with rigid CSRF parsing."""
     if not EMAIL or not PASSWORD:
         return False
 
@@ -194,32 +213,50 @@ async def terminate_case_on_dashboard(case_id):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
         'Origin': 'https://tech24et.com',
         'Referer': 'https://tech24et.com/'
     }
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
         try:
-            await session.get(csrf_url)
-            xsrf = session.cookies.get("XSRF-TOKEN")
+            csrf_res = await session.get(csrf_url)
+            cookies_dict = {}
+            for header, val in csrf_res.headers.multi_items():
+                if header.lower() == 'set-cookie':
+                    cookie_parts = val.split(';')[0].split('=', 1)
+                    if len(cookie_parts) == 2:
+                        cookies_dict[cookie_parts[0].strip()] = cookie_parts[1].strip()
+
+            xsrf = cookies_dict.get("XSRF-TOKEN") or session.cookies.get("XSRF-TOKEN")
             if xsrf: 
                 decoded_xsrf = urllib.parse.unquote(xsrf)
                 session.headers.update({
                     'X-XSRF-TOKEN': decoded_xsrf,
-                    'X-CSRF-TOKEN': decoded_xsrf
+                    'X-CSRF-TOKEN': decoded_xsrf,
+                    'Cookie': "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
                 })
                 
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
             if login_res.status_code not in [200, 201, 204]:
                 return False
             
-            updated_xsrf = session.cookies.get("XSRF-TOKEN")
-            if updated_xsrf:
-                decoded_updated = urllib.parse.unquote(updated_xsrf)
+            for header, val in login_res.headers.multi_items():
+                if header.lower() == 'set-cookie':
+                    cookie_parts = val.split(';')[0].split('=', 1)
+                    if len(cookie_parts) == 2:
+                        cookies_dict[cookie_parts[0].strip()] = cookie_parts[1].strip()
+
+            if cookies_dict.get("XSRF-TOKEN"):
+                decoded_updated = urllib.parse.unquote(cookies_dict["XSRF-TOKEN"])
                 session.headers.update({
                     'X-XSRF-TOKEN': decoded_updated,
                     'X-CSRF-TOKEN': decoded_updated
                 })
+                
+            session.headers.update({
+                'Cookie': "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+            })
                 
             res = await session.post(terminate_url, json={'status': 'completed'})
             return res.status_code in [200, 201, 204]
@@ -562,7 +599,7 @@ def main():
     
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    threading.Thread(target=start_background_loop, args=(application,), daemon=True).start()
+    threading.Thread(start_background_loop, args=(application,), daemon=True).start()
 
     logger.info("Bot starting up online polling loops...")
     application.run_polling()
