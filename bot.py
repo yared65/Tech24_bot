@@ -29,9 +29,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# To track active users to send real-time alerts
 ACTIVE_CHATS = set()
-# To prevent duplicate notifications for the same case
 NOTIFIED_CASES = set()
 
 # ==========================================
@@ -50,7 +48,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 4. UTILITY DATA PARSERS (CLEANED)
+# 4. UTILITY DATA PARSERS
 # ==========================================
 def extract_field(item, keyword):
     """Safely extracts nested fields and cleans up raw string-dict structures."""
@@ -71,7 +69,6 @@ def extract_field(item, keyword):
     if val is None:
         return ""
 
-    # If the value is a string representation of a dict, parse it
     if isinstance(val, str) and (val.startswith('{') or val.startswith('[')):
         try:
             val = ast.literal_eval(val)
@@ -87,10 +84,10 @@ def extract_field(item, keyword):
     return str(val)
 
 # ==========================================
-# 5. DASHBOARD API SCRAPING & MUTATION
+# 5. DASHBOARD API SCRAPING & MUTATION (FIXED)
 # ==========================================
 async def scrape_website_cases():
-    """Authenticates and pulls active ATM cases from the tech24et dashboard."""
+    """Authenticates using stateful cookies and pulls active ATM cases for Adama."""
     if not EMAIL or not PASSWORD:
         return [], "Configuration Error: Missing login credentials in Environment Variables."
 
@@ -98,48 +95,55 @@ async def scrape_website_cases():
     login_url = 'https://api.tech24et.com/api/login'
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
     
+    # Strictly structured headers mimicking stateful Sanctum requirements
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
         'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
+        'Referer': 'https://tech24et.com/',
+        'Accept-Language': 'en-US,en;q=0.9'
     }
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # 1. Fetch CSRF cookie
-            await session.get(csrf_url)
+            # Step 1: Request CSRF Cookie
+            csrf_res = await session.get(csrf_url)
+            
+            # Step 2: Manually locate the XSRF Token from cookie jar
             xsrf_token = session.cookies.get("XSRF-TOKEN")
             if not xsrf_token:
-                for cookie in session.cookies:
-                    if cookie.name == 'XSRF-TOKEN':
-                        xsrf_token = cookie.value
+                for cookie_name, cookie_val in session.cookies.items():
+                    if cookie_name.upper() == 'XSRF-TOKEN':
+                        xsrf_token = cookie_val
                         break
 
-            if xsrf_token: 
-                decoded_token = urllib.parse.unquote(xsrf_token)
-                session.headers.update({
-                    'X-XSRF-TOKEN': decoded_token,
-                    'X-CSRF-TOKEN': decoded_token
-                })
+            if not xsrf_token:
+                return [], "CSRF initialization failed: Token not provided by server."
 
-            # 2. Login
+            # Step 3: Inject the verified token into the active headers
+            decoded_token = urllib.parse.unquote(xsrf_token)
+            session.headers.update({
+                'X-XSRF-TOKEN': decoded_token,
+                'X-CSRF-TOKEN': decoded_token
+            })
+
+            # Step 4: Login attempt
             login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
             login_res = await session.post(login_url, json=login_payload)
+            
             if login_res.status_code not in [200, 201, 204]: 
                 return [], f"Login failed with status {login_res.status_code}"
 
-            # 3. Refresh CSRF token for authenticated session
+            # Step 5: Refresh token headers in case a new session token was issues on success
             updated_xsrf = session.cookies.get("XSRF-TOKEN")
             if updated_xsrf:
-                decoded_updated = urllib.parse.unquote(updated_xsrf)
                 session.headers.update({
-                    'X-XSRF-TOKEN': decoded_updated,
-                    'X-CSRF-TOKEN': decoded_updated
+                    'X-XSRF-TOKEN': urllib.parse.unquote(updated_xsrf),
+                    'X-CSRF-TOKEN': urllib.parse.unquote(updated_xsrf)
                 })
 
-            # 4. Fetch Cases
+            # Step 6: Query entries
             response = await session.get(api_url)
             if response.status_code != 200: 
                 return [], f"Failed to fetch data. Status: {response.status_code}"
@@ -152,7 +156,9 @@ async def scrape_website_cases():
                 if not item or not isinstance(item, dict): 
                     continue
                 
-                if "adama" in str(item).lower():
+                # Strict check for 'adama' while bypassing 'adama district' as requested
+                item_str = str(item).lower()
+                if "adama" in item_str and "adama district" not in item_str:
                     status = extract_field(item, 'status') or extract_field(item, 'progress') or "Pending"
                     status_text = "Completed" if status.lower() in ["complete", "completed", "1", "done", "closed"] else "Pending"
                     
@@ -229,7 +235,7 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
     if status_msg != "OK":
         return f"❌ **Error generating report**: {status_msg}"
     if not cases:
-        return "⚠️ **No data records found on the dashboard for Adama District.**"
+        return "⚠️ **No data records found on the dashboard for Adama.**"
 
     now = datetime.now()
     filtered_cases = []
@@ -289,7 +295,6 @@ async def build_formatted_report(title: str, days_filter: int = None) -> str:
 # 7. TELEGRAM COMPONENT & INTERACTION UI
 # ==========================================
 def build_pending_ui(case):
-    """Card for PENDING command - Only 'Open Dashboard' button."""
     text = (
         f"📋 **Case ID Details:** {case['case_id']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -309,7 +314,6 @@ def build_pending_ui(case):
     return text, InlineKeyboardMarkup(keyboard)
 
 def build_terminate_ui(case):
-    """Card for TERMINATE workflow - Terminate, Dashboard, and Cancel buttons."""
     text = (
         f"📋 **Case ID Details:** {case['case_id']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -334,10 +338,9 @@ def build_terminate_ui(case):
 # 8. COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Save chat ID for background notifications
     ACTIVE_CHATS.add(update.effective_chat.id)
     welcome_text = (
-        "👋 **Welcome to Tech24 Adama District Bot**\n\n"
+        "👋 **Welcome to Tech24 Adama Bot**\n\n"
         "💻 **Available Commands:**\n"
         "• /pending   - View all current open/unresolved cases\n"
         "• /terminate - Access list of cases to quickly terminate/complete\n"
@@ -358,7 +361,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pending_cases:
         keyboard = [[InlineKeyboardButton("🗂 Access Live Dashboard ↗️", url="https://tech24et.com")]]
         await update.message.reply_text(
-            "✅ **All clear!** No pending or ongoing cases found in **Adama District**.",
+            "✅ **All clear!** No pending or ongoing cases found in **Adama**.",
             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
@@ -370,7 +373,6 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         for case in pending_cases:
             btn_text = f"⏳ {case['case_id']} | {case['bank']} - {case['branch']}"
-            # Prefix callback with 'showpending_' to distinguish from terminate selection
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"showpending_{case['case_id']}")])
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
@@ -392,7 +394,6 @@ async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for case in pending_cases:
         btn_text = f"🛑 Complete Case {case['case_id']} ({case['bank']})"
-        # Prefix callback with 'showterm_' to show the termination card options
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"showterm_{case['case_id']}")])
     
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
@@ -458,7 +459,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # User clicks a case under /pending -> Show card with Dashboard button only
     if data.startswith("showpending_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
@@ -469,7 +469,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
 
-    # User clicks a case under /terminate -> Show card with Terminate, Dashboard, and Cancel buttons
     elif data.startswith("showterm_"):
         case_id = data.split("_")[1]
         cases, _ = await scrape_website_cases()
@@ -480,7 +479,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await query.edit_message_text("❌ Case file could not be fetched or has been removed.", parse_mode="Markdown")
 
-    # User triggers the backend termination action
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
         await query.answer("⏳ Dispatching request to mark case completed...", show_alert=False)
@@ -499,7 +497,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # 10. BACKGROUND TIMER ALERTS (10-Minute Windows)
 # ==========================================
 async def check_new_cases_loop(application: Application):
-    """Asynchronous background loop checking for newly registered pending cases (<10 mins)."""
     while True:
         try:
             cases, status = await scrape_website_cases()
@@ -508,11 +505,8 @@ async def check_new_cases_loop(application: Application):
                 for c in cases:
                     if c['status'] == "Pending" and c['case_id'] not in NOTIFIED_CASES:
                         try:
-                            # Parse case date: "YYYY-MM-DD HH:MM:SS"
                             case_time = datetime.strptime(c['date'], "%Y-%m-%d %H:%M:%S")
-                            # Check if the case was registered within the last 10 minutes
                             if now - case_time <= timedelta(minutes=10):
-                                # Craft layout matching the beautiful second photo style
                                 notification_text = (
                                     f"🚨 **ATM Incident Notification**\n\n"
                                     f"📝 **ID:** {c['case_id']},\n"
@@ -527,7 +521,6 @@ async def check_new_cases_loop(application: Application):
                                     [InlineKeyboardButton("Open in tech24et.com dashboard", url="https://tech24et.com")]
                                 ])
                                 
-                                # Broadcast to all active chat sessions
                                 for chat_id in list(ACTIVE_CHATS):
                                     try:
                                         await application.bot.send_message(
@@ -539,14 +532,12 @@ async def check_new_cases_loop(application: Application):
                                     except Exception as send_err:
                                         logger.warning(f"Could not broadcast to chat {chat_id}: {send_err}")
                                 
-                                # Mark as notified to prevent spam
                                 NOTIFIED_CASES.add(c['case_id'])
                         except Exception as parse_err:
                             logger.error(f"Error parsing date for case {c['case_id']}: {parse_err}")
         except Exception as err:
             logger.error(f"Background alert loop encountered an error: {err}")
         
-        # Poll the server every 60 seconds
         await asyncio.sleep(60)
 
 def start_background_loop(application):
@@ -558,13 +549,10 @@ def start_background_loop(application):
 # 11. MAIN BOT ENTRY POINT
 # ==========================================
 def main():
-    # Start Keep-Alive web server
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    # Initialize application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Route bot commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
@@ -572,10 +560,8 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
     
-    # Route callback interactive selections
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    # Run the background monitoring alert thread
     threading.Thread(target=start_background_loop, args=(application,), daemon=True).start()
 
     logger.info("Bot starting up online polling loops...")
