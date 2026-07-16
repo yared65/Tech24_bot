@@ -60,7 +60,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST DEEP JSON PARSING HELPER (BUG FIX FOR PHOTO 3317)
+# 3. ROBUST DEEP JSON PARSING HELPER
 # ==========================================
 def deep_extract_name(data, target_keyword):
     """
@@ -72,7 +72,14 @@ def deep_extract_name(data, target_keyword):
 
     # If it is a dictionary
     if isinstance(data, dict):
-        # 1st priority: Look for common title/name keys
+        # Specific search for technician names combining First & Last name
+        if target_keyword == 'technician':
+            first = data.get('first_name') or data.get('name') or data.get('username')
+            last = data.get('last_name') or ""
+            if first:
+                return f"{first} {last}".strip()
+
+        # Specific search for keys containing our keyword
         for key in ['name', 'title', 'bank_name', 'branch_name', 'terminal_id', 'serial_number']:
             if key in data and data[key]:
                 if isinstance(data[key], (dict, list)):
@@ -80,7 +87,6 @@ def deep_extract_name(data, target_keyword):
                     if res: return res
                 return str(data[key])
                 
-        # 2nd priority: Look for keys containing our keyword
         for k, v in data.items():
             if target_keyword.lower() in k.lower() and v:
                 if isinstance(v, (dict, list)):
@@ -88,7 +94,6 @@ def deep_extract_name(data, target_keyword):
                     if res: return res
                 return str(v)
                 
-        # 3rd priority: Deep dive into all values
         for v in data.values():
             if isinstance(v, (dict, list)):
                 res = deep_extract_name(v, target_keyword)
@@ -105,12 +110,10 @@ def deep_extract_name(data, target_keyword):
 
 def clean_raw_string(text):
     """
-    Fallback regex cleaner. If the string contains database-like dump fields,
-    it extracts only the meaningful name (e.g., from 'bank_name: Awash Bank' -> 'Awash Bank')
+    Fallback regex cleaner for database-like dump fields.
     """
     if not text:
         return ""
-    # Try to search for patterns like 'name': 'Value' or "name": "Value" or bank_name etc.
     patterns = [
         r'[\'"]name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
         r'[\'"]bank_name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
@@ -122,7 +125,6 @@ def clean_raw_string(text):
         if match:
             return match.group(1).strip()
             
-    # Remove braces and quotes if it's still messy
     cleaned = re.sub(r'[{}\'"\[\]]', '', text)
     if 'name:' in cleaned:
         parts = cleaned.split('name:')
@@ -138,18 +140,15 @@ def extract_field(item, keyword):
     if not item:
         return ""
 
-    # If it is already a dictionary, deep search it
     if isinstance(item, dict):
         extracted = deep_extract_name(item, keyword)
         if extracted:
             return extracted
 
-    # If it's a string representation of a JSON
     if isinstance(item, str):
         stripped = item.strip()
         if (stripped.startswith('{') and stripped.endswith('}')) or (stripped.startswith('[') and stripped.endswith(']')):
             try:
-                # Replace python-specific None/True/False to make it valid JSON
                 valid_json_str = stripped.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
                 parsed = json.loads(valid_json_str)
                 extracted = deep_extract_name(parsed, keyword)
@@ -158,7 +157,6 @@ def extract_field(item, keyword):
             except Exception:
                 pass
         
-        # Fallback to Regex cleaner for raw unparsed strings
         return clean_raw_string(stripped)
 
     return str(item)
@@ -218,20 +216,36 @@ async def scrape_website_cases():
                 if "adama" in raw_string_dump:
                     case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
                     
-                    # Run clean extraction
+                    # 1. CLEAN EXTRACTION FOR BANK, BRANCH & TERMINAL
                     bank = extract_field(entry.get('bank'), 'bank') or extract_field(entry, 'bank')
                     branch = extract_field(entry.get('branch'), 'branch') or extract_field(entry, 'branch')
                     terminal = extract_field(entry.get('terminal'), 'terminal') or extract_field(entry, 'terminal')
-                    issue = entry.get('description') or entry.get('issue') or "N/A"
-                    technician = extract_field(entry.get('technician'), 'name') or extract_field(entry, 'technician')
-                    tech_phone = extract_field(entry.get('technician'), 'phone') or "N/A"
+                    
+                    # 2. ROBUST ISSUE (DESCRIPTION) SEARCH
+                    issue = entry.get('description') or entry.get('issue') or entry.get('issue_description') or entry.get('title') or "N/A"
+                    
+                    # 3. ROBUST TECHNICIAN SEARCH (Checks sub-objects and combinations)
+                    tech_obj = entry.get('technician') or entry.get('user') or {}
+                    technician = ""
+                    if isinstance(tech_obj, dict):
+                        technician = extract_field(tech_obj, 'technician')
+                    if not technician:
+                        technician = extract_field(entry, 'technician') or "Assigned Tech"
+                        
+                    # 4. ROBUST PHONE SEARCH
+                    tech_phone = "N/A"
+                    if isinstance(tech_obj, dict):
+                        tech_phone = tech_obj.get('phone') or tech_obj.get('mobile') or tech_obj.get('phone_number') or "N/A"
+                    if tech_phone == "N/A":
+                        tech_phone = entry.get('tech_phone') or entry.get('phone') or "N/A"
+                        
                     comment = entry.get('comment', 'No comments.')
                     district = "Adama"
                     
-                    created_at = entry.get('created_at', entry.get('start_date', ''))
-                    date_str = str(created_at)[:10] if created_at else "N/A"
+                    # 5. ROBUST REPORTED DATE SEARCH
+                    created_at = entry.get('created_at') or entry.get('reported_at') or entry.get('start_date') or ''
+                    date_str = str(created_at)[:16].replace("T", " ") if created_at else "N/A"
                     
-                    # Parse timestamp safely for duration sorting
                     try:
                         date_obj = datetime.strptime(str(created_at)[:19], "%Y-%m-%dT%H:%M:%S")
                     except Exception:
@@ -240,17 +254,22 @@ async def scrape_website_cases():
                         except Exception:
                             date_obj = datetime.now()
 
-                    # Status classification
-                    status_raw = extract_field(entry.get('status'), 'status') or str(entry.get('status', ''))
-                    status_raw = status_raw.strip().lower()
+                    # 6. ADVANCED STATUS RESOLUTION (FIX FOR COMPLETED CASES SHOWING PENDING)
+                    status_raw = str(entry.get('status', '')).strip().lower()
                     progress_raw = str(entry.get('progress', '')).strip().lower()
+                    is_closed_val = entry.get('is_closed')
                     
-                    closed_keywords = ["complete", "completed", "done", "close", "closed", "resolved", "terminated", "success"]
+                    closed_keywords = ["complete", "completed", "done", "close", "closed", "resolved", "terminated", "success", "success-closed"]
                     
                     is_completed = False
-                    if any(kw in status_raw for kw in closed_keywords) or any(kw in progress_raw for kw in closed_keywords):
+                    # Check status string
+                    if any(kw in status_raw for kw in closed_keywords):
                         is_completed = True
-                    elif entry.get('is_closed') is True or str(entry.get('is_closed')).lower() in ['true', '1']:
+                    # Check progress string
+                    elif any(kw in progress_raw for kw in closed_keywords):
+                        is_completed = True
+                    # Check boolean status
+                    elif is_closed_val is True or str(is_closed_val).lower() in ['true', '1', 'yes']:
                         is_completed = True
 
                     status_text = "Completed" if is_completed else "Pending"
@@ -264,7 +283,7 @@ async def scrape_website_cases():
                         'issue': issue,
                         'status': status_text,
                         'comment': comment,
-                        'technician': technician if technician else "Assigned Tech",
+                        'technician': technician,
                         'tech_phone': tech_phone,
                         'date': date_str,
                         'date_obj': date_obj
@@ -336,7 +355,6 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not new_pending_cases:
         return
 
-    # Dynamic Alert System
     if len(new_pending_cases) == 1:
         case = new_pending_cases[0]
         text, kb = build_case_detail_ui(case)
@@ -363,20 +381,14 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS (WITH DEEP EXTRACTION ON SELECTED VIEW)
+# 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
     # Deep extract and clean all fields for the interface
-    clean_bank = extract_field(case['bank'], 'bank')
-    clean_branch = extract_field(case['branch'], 'branch')
-    clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number')
-    clean_tech = extract_field(case['technician'], 'name')
-
-    # Fallback to original values if extraction returns empty
-    clean_bank = clean_bank if clean_bank else str(case['bank'])
-    clean_branch = clean_branch if clean_branch else str(case['branch'])
-    clean_terminal = clean_terminal if clean_terminal else str(case['terminal'])
-    clean_tech = clean_tech if clean_tech else str(case['technician'])
+    clean_bank = extract_field(case['bank'], 'bank') or str(case['bank'])
+    clean_branch = extract_field(case['branch'], 'branch') or str(case['branch'])
+    clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number') or str(case['terminal'])
+    clean_tech = extract_field(case['technician'], 'technician') or str(case['technician'])
 
     # Safely escape text to avoid Markdown parsing exceptions
     safe_bank = clean_bank.replace("_", "\\_").replace("*", "\\*")
@@ -418,7 +430,7 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
     if not filtered_cases:
         return f"📭 No cases recorded on dashboard in the past {days_limit} days."
 
-    report_lines = [f"🏧 *{title} Report/yared Girma/*\n"]
+    report_lines = [f"🏧 *{title} Report /Yared Girma/*\n"]
 
     for case in filtered_cases:
         try:
@@ -479,7 +491,7 @@ def generate_excel_bytes(cases):
         clean_bank = extract_field(case['bank'], 'bank') or case['bank']
         clean_branch = extract_field(case['branch'], 'branch') or case['branch']
         clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number') or case['terminal']
-        clean_tech = extract_field(case['technician'], 'name') or case['technician']
+        clean_tech = extract_field(case['technician'], 'technician') or case['technician']
 
         row_data = [
             case['case_id'], clean_terminal, clean_bank, clean_branch,
