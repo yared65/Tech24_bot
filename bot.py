@@ -27,7 +27,16 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
-NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID")
+
+# Safely parse and convert NOTIFICATION_CHAT_ID to Integer if it is a number
+raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
+if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
+    try:
+        NOTIFICATION_CHAT_ID = int(raw_chat_id)
+    except ValueError:
+        NOTIFICATION_CHAT_ID = raw_chat_id
+else:
+    NOTIFICATION_CHAT_ID = raw_chat_id
 
 # In-memory tracker to prevent duplicate notifications during auto-polling
 SENT_CASES_TRACKER = set()
@@ -42,7 +51,6 @@ log.setLevel(logging.ERROR)
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
-    # Solves potential 404 tracking URL mismatches by accepting any incoming path
     return "Bot is Running and Alive!", 200
 
 def run_health_server():
@@ -60,7 +68,6 @@ def safe_parse_json(val):
         return val
     try:
         if isinstance(val, str):
-            # Clean common formatting discrepancies before standard loads
             cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
             return json.loads(cleaned)
     except Exception:
@@ -69,38 +76,39 @@ def safe_parse_json(val):
 
 def extract_field(item, keyword):
     """
-    Cleans messy database rows. Parses nested items or strings like 
-    "{'bank_id': 1, 'bank_name': 'Awash'}" to extract clean names.
+    Cleans database rows. Accurately extracts values whether the input is
+    a dictionary, a serialized JSON string, or a clean plain string (like Oda Boqotu).
     """
     if not item:
         return ""
         
-    parsed = safe_parse_json(item)
-    if parsed:
-        for k, v in parsed.items():
-            if keyword.lower() in k.lower():
-                if isinstance(v, dict):
-                    return v.get('name', v.get('title', str(v)))
-                return str(v)
-        # Fallbacks
-        if keyword.lower() == 'bank':
-            return parsed.get('bank_name', parsed.get('name', ''))
-        if keyword.lower() == 'branch':
-            return parsed.get('branch_name', parsed.get('name', ''))
-            
+    # Case 1: If it is already a dictionary
     if isinstance(item, dict):
+        # First try matching keys
         for k, v in item.items():
             if keyword.lower() in k.lower():
                 if isinstance(v, dict):
                     return v.get('name', v.get('title', str(v)))
                 return str(v)
-                
+        # Fallbacks for dictionary
+        for fallback in ['name', 'title', 'bank_name', 'branch_name']:
+            if fallback in item:
+                return str(item[fallback])
+        return str(item)
+
+    # Case 2: If it is a string
     if isinstance(item, str):
-        # Fallback raw extraction if the string contains key details
-        if keyword.lower() in item.lower():
-            return item
+        item_stripped = item.strip()
+        # If it looks like a JSON string, try to parse it
+        if (item_stripped.startswith('{') and item_stripped.endswith('}')) or (item_stripped.startswith('[') and item_stripped.endswith(']')):
+            parsed = safe_parse_json(item_stripped)
+            if parsed and isinstance(parsed, dict):
+                return extract_field(parsed, keyword)
+        
+        # If it's a plain string, return it directly (solves the plain string deletion bug)
+        return item_stripped
             
-    return ""
+    return str(item)
 
 # ==========================================
 # 4. API SCRAPER & TRANSACTION ENGINES
@@ -157,7 +165,7 @@ async def scrape_website_cases():
                 if "adama" in raw_string_dump:
                     case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
                     
-                    # Run deep JSON string sanitization
+                    # Run clean extraction
                     bank = extract_field(entry.get('bank'), 'bank') or extract_field(entry, 'bank')
                     branch = extract_field(entry.get('branch'), 'branch') or extract_field(entry, 'branch')
                     terminal = extract_field(entry.get('terminal'), 'terminal') or extract_field(entry, 'terminal')
@@ -203,9 +211,6 @@ async def scrape_website_cases():
             return [], f"Scraper Exception: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
-    """
-    Connects to target API, authenticates safely and updates case status to close.
-    """
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
     login_url = "https://api.tech24et.com/api/login"
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
@@ -220,19 +225,16 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0, verify=False) as client:
         try:
-            # Prepare Session cookies
             await client.get(csrf_url)
             xsrf_token = client.cookies.get("XSRF-TOKEN")
             if xsrf_token:
                 client.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
 
-            # Authenticate Session
             payload = {"email": EMAIL.strip(), "password": PASSWORD.strip()}
             login_res = await client.post(login_url, json=payload)
             if login_res.status_code not in [200, 201, 204]:
                 return False, f"Auth Error status: {login_res.status_code}"
 
-            # Post action update
             res = await client.post(terminate_url, json={})
             if res.status_code in [200, 204]:
                 return True, "Successfully Closed"
@@ -269,9 +271,8 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not new_pending_cases:
         return
 
-    # Trigger custom dynamic layouts based on the count of new cases
+    # Dynamic Alert System
     if len(new_pending_cases) == 1:
-        # Single case: Send rich text card + operational action buttons (Photo 2 style)
         case = new_pending_cases[0]
         text, kb = build_case_detail_ui(case)
         await context.bot.send_message(
@@ -281,8 +282,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        # Multiple cases: Send a condensed navigation menu (Photo 3 style)
-        text = f"🚨 *{len(new_pending_cases)} New Pending Cases Detected!*\nSelect a case button below to view details and action buttons:"
+        text = f"🚨 *{len(new_pending_cases)} New Pending Cases Detected!*\nSelect a case button below to view details and actions:"
         keyboard = []
         for case in new_pending_cases:
             button_label = f"🏧 {case['bank']} - {case['branch']} (ID: {case['case_id']})"
@@ -299,19 +299,22 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 # 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
-    """
-    Renders clean, structured layout fields without any nested raw JSON strings.
-    """
+    # Safely escape text to avoid Markdown parsing exceptions
+    safe_bank = case['bank'].replace("_", "\\_").replace("*", "\\*")
+    safe_branch = case['branch'].replace("_", "\\_").replace("*", "\\*")
+    safe_issue = case['issue'].replace("_", "\\_").replace("*", "\\*")
+    safe_tech = case['technician'].replace("_", "\\_").replace("*", "\\*")
+    
     text = (
         f"📋 *Case ID:* `{case['case_id']}`\n"
-        f"🏧 *Terminal ID:* {case['terminal']}\n"
-        f"🏛 *Bank:* {case['bank']}\n"
-        f"📍 *Branch:* {case['branch']}\n"
-        f"⚠️ *Issue Description:* {case['issue']}\n"
+        f"🏧 *Terminal:* {case['terminal']}\n"
+        f"🏛 *Bank:* {safe_bank}\n"
+        f"📍 *Branch:* {safe_branch}\n"
+        f"⚠️ *Issue:* {safe_issue}\n"
         f"📌 *Status:* {case['status']}\n"
         f"🌍 *District:* {case['district']}\n"
         f"💬 *Comment:* {case['comment']}\n"
-        f"👤 *Assigned Tech:* {case['technician']}\n"
+        f"👤 *Technician:* {safe_tech}\n"
         f"📞 *Tech Phone:* {case['tech_phone']}\n"
         f"📅 *Reported At:* {case['date']} (EAT)\n"
     )
@@ -328,15 +331,6 @@ def build_case_detail_ui(case):
 # 7. EXCEL & REPORT ENGINE GENERATORS
 # ==========================================
 def format_summary_report(cases, days_limit=7, title="Weekly"):
-    """
-    Outputs the exact visual format:
-    🏧 Weekly report/yared Girma/
-    ®15/06/2025 Registered |Dabe Soloke Branch |Awash Bank|(SLLS belt problem)|Completed
-    ...
-    Generally
-    🏛 Awash Registered Completed -2
-    🏛 Dashen Registered Completed -1
-    """
     now = datetime.now()
     cutoff_date = now - timedelta(days=days_limit)
     filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
@@ -344,12 +338,9 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
     if not filtered_cases:
         return f"📭 No cases recorded on dashboard in the past {days_limit} days."
 
-    # Top Header Lines
     report_lines = [f"🏧 *{title} Report/yared Girma/*\n"]
 
-    # Individual Case String Outputs
     for case in filtered_cases:
-        # Convert date safely to the user's custom formatting (DD/MM/YYYY)
         try:
             date_formatted = case['date_obj'].strftime("%d/%m/%Y")
         except Exception:
@@ -363,7 +354,6 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
 
     report_lines.append("\n*Generally*")
 
-    # Group metrics by Bank
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
@@ -375,22 +365,17 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
             bank_analytics[b_name]["completed"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        # Render clean consolidated metrics
         summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed -{stats['completed']}"
         report_lines.append(summary_line)
 
     return "\n".join(report_lines)
 
 def generate_excel_bytes(cases):
-    """
-    Writes dynamic case logs to memory buffer formatted as clean Excel rows.
-    """
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Incident Log Database"
     ws.views.sheetView[0].showGridLines = True
 
-    # Styling Palettes
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     data_font = Font(name="Calibri", size=10, bold=False, color="000000")
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -407,7 +392,6 @@ def generate_excel_bytes(cases):
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Write normalized rows
     for row_idx, case in enumerate(cases, start=2):
         row_data = [
             case['case_id'], case['terminal'], case['bank'], case['branch'],
@@ -419,13 +403,11 @@ def generate_excel_bytes(cases):
             cell = ws.cell(row=row_idx, column=col_num)
             cell.font = data_font
             cell.border = grid_border
-            # Align strings depending on content type
             if col_num in [1, 2, 6, 10, 11]:
                 cell.alignment = Alignment(horizontal="center")
             else:
                 cell.alignment = Alignment(horizontal="left")
 
-    # Adjust columns widths to match sizes dynamically
     for col in ws.columns:
         max_len = 0
         col_letter = col[0].column_letter
@@ -468,12 +450,10 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pending_cases:
         return await update.message.reply_text("✅ *Awesome!* No unresolved cases in Adama dashboard.", parse_mode="Markdown")
 
-    # Dynamic UI display
     if len(pending_cases) == 1:
         text, kb = build_case_detail_ui(pending_cases[0])
         await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
     else:
-        # Multiple cases navigation layout (Photo 3)
         text = f"📋 *Adama Active Logs ({len(pending_cases)} Pending)*\nSelect a button to view specific case actions:"
         keyboard = []
         for c in pending_cases:
@@ -560,7 +540,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # User clicks on specific detailed view button from navigation lists
     if data.startswith("view_"):
         case_id = data.split("_")[1]
         cases, status = await scrape_website_cases()
@@ -574,7 +553,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
 
-    # User clicks on refresh inside detailed card UI
     elif data.startswith("refresh_"):
         case_id = data.split("_")[2] if len(data.split("_")) == 3 else data.split("_")[1]
         cases, status = await scrape_website_cases()
@@ -588,7 +566,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(f"🔄 *Refreshed at:* {datetime.now().strftime('%H:%M:%S')}\n\n{text}", reply_markup=kb, parse_mode="Markdown")
 
-    # User clicks on direct terminate action
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
         await query.edit_message_text(f"⏳ Attempting terminal state authorization closure for Case ID `{case_id}`...", parse_mode="Markdown")
@@ -597,7 +574,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if success:
             await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated on active dashboard database.", parse_mode="Markdown")
         else:
-            # Add fallback quick closure option buttons in case of failure
             keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data=f"terminate_{case_id}")],
                         [InlineKeyboardButton("❌ Dismiss Panel", callback_data="cancel_action")]]
             await query.edit_message_text(
@@ -607,13 +583,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
 # ==========================================
-# 10. CRITICAL STARTUP ENGLISH MENU INITIALIZER
+# 10. STARTUP ENGLISH MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
-    """
-    Invoked once during startup to safely overwrite default system menu actions
-    to English directly over Telegram Bot API servers.
-    """
     logger.info("Setting bot command definitions cleanly to English layout during startup sequence...")
     commands = [
         BotCommand("start", "Initialize bot profile"),
@@ -634,13 +606,10 @@ def main():
         logger.error("SYSTEM ERROR: TELEGRAM_BOT_TOKEN environment variable is missing.")
         return
 
-    # Start Flask Web Health Check for keeping UptimeRobot alive on background thread
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # Build Application client with correct startup sequences
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Connect Command actions
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
@@ -648,9 +617,14 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
     
-    # Connect interactive callback buttons
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    # Configure background loop task to run every 600 seconds (10 minutes)
     job_queue = application.job_queue
-    job_queue.run_repeating(auto_monitor_dashboard, interval=600,
+    job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
+    logger.info("Auto-monitor dashboard background task configured to cycle every 10 minutes.")
+
+    logger.info("Bot application polling successfully initiated.")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
