@@ -3,6 +3,7 @@ import logging
 import asyncio
 import threading
 import json
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -27,7 +28,16 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
-NOTIFICATION_CHAT_ID = os.environ.get("NOTIFICATION_CHAT_ID")
+
+# Safely parse and convert NOTIFICATION_CHAT_ID to Integer if it is a number
+raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
+if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
+    try:
+        NOTIFICATION_CHAT_ID = int(raw_chat_id)
+    except ValueError:
+        NOTIFICATION_CHAT_ID = raw_chat_id
+else:
+    NOTIFICATION_CHAT_ID = raw_chat_id
 
 # In-memory tracker to prevent duplicate notifications during auto-polling
 SENT_CASES_TRACKER = set()
@@ -42,7 +52,6 @@ log.setLevel(logging.ERROR)
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
-    # Solves potential 404 tracking URL mismatches by accepting any incoming path
     return "Bot is Running and Alive!", 200
 
 def run_health_server():
@@ -51,56 +60,106 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST NESTED JSON PARSING HELPERS
+# 3. ROBUST DEEP JSON PARSING HELPER
 # ==========================================
-def safe_parse_json(val):
-    if not val:
-        return {}
-    if isinstance(val, dict):
-        return val
-    try:
-        if isinstance(val, str):
-            # Clean common formatting discrepancies before standard loads
-            cleaned = val.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
-            return json.loads(cleaned)
-    except Exception:
-        pass
-    return {}
+def deep_extract_name(data, target_keyword):
+    """
+    Recursively searches inside dicts/lists to find values matching 
+    the target keyword (e.g., 'name', 'bank_name', 'branch_name', etc.).
+    """
+    if not data:
+        return None
+
+    # If it is a dictionary
+    if isinstance(data, dict):
+        # Specific search for technician names combining First & Last name
+        if target_keyword == 'technician':
+            first = data.get('first_name') or data.get('name') or data.get('username')
+            last = data.get('last_name') or ""
+            if first:
+                return f"{first} {last}".strip()
+
+        # Specific search for keys containing our keyword
+        for key in ['name', 'title', 'bank_name', 'branch_name', 'terminal_id', 'serial_number']:
+            if key in data and data[key]:
+                if isinstance(data[key], (dict, list)):
+                    res = deep_extract_name(data[key], target_keyword)
+                    if res: return res
+                return str(data[key])
+                
+        for k, v in data.items():
+            if target_keyword.lower() in k.lower() and v:
+                if isinstance(v, (dict, list)):
+                    res = deep_extract_name(v, target_keyword)
+                    if res: return res
+                return str(v)
+                
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                res = deep_extract_name(v, target_keyword)
+                if res: return res
+
+    # If it is a list
+    elif isinstance(data, list):
+        for item in data:
+            res = deep_extract_name(item, target_keyword)
+            if res:
+                return res
+                
+    return None
+
+def clean_raw_string(text):
+    """
+    Fallback regex cleaner for database-like dump fields.
+    """
+    if not text:
+        return ""
+    patterns = [
+        r'[\'"]name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]bank_name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]branch_name[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+        r'[\'"]title[\'"]\s*:\s*[\'"]([^"\'}]+)[\'"]',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+            
+    cleaned = re.sub(r'[{}\'"\[\]]', '', text)
+    if 'name:' in cleaned:
+        parts = cleaned.split('name:')
+        if len(parts) > 1:
+            return parts[1].split(',')[0].strip()
+            
+    return text.strip()
 
 def extract_field(item, keyword):
     """
-    Cleans messy database rows. Parses nested items or strings like 
-    "{'bank_id': 1, 'bank_name': 'Awash'}" to extract clean names.
+    Cleans database rows and extracts the most human-readable name.
     """
     if not item:
         return ""
-        
-    parsed = safe_parse_json(item)
-    if parsed:
-        for k, v in parsed.items():
-            if keyword.lower() in k.lower():
-                if isinstance(v, dict):
-                    return v.get('name', v.get('title', str(v)))
-                return str(v)
-        # Fallbacks
-        if keyword.lower() == 'bank':
-            return parsed.get('bank_name', parsed.get('name', ''))
-        if keyword.lower() == 'branch':
-            return parsed.get('branch_name', parsed.get('name', ''))
-            
+
     if isinstance(item, dict):
-        for k, v in item.items():
-            if keyword.lower() in k.lower():
-                if isinstance(v, dict):
-                    return v.get('name', v.get('title', str(v)))
-                return str(v)
-                
+        extracted = deep_extract_name(item, keyword)
+        if extracted:
+            return extracted
+
     if isinstance(item, str):
-        # Fallback raw extraction if the string contains key details
-        if keyword.lower() in item.lower():
-            return item
-            
-    return ""
+        stripped = item.strip()
+        if (stripped.startswith('{') and stripped.endswith('}')) or (stripped.startswith('[') and stripped.endswith(']')):
+            try:
+                valid_json_str = stripped.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
+                parsed = json.loads(valid_json_str)
+                extracted = deep_extract_name(parsed, keyword)
+                if extracted:
+                    return extracted
+            except Exception:
+                pass
+        
+        return clean_raw_string(stripped)
+
+    return str(item)
 
 # ==========================================
 # 4. API SCRAPER & TRANSACTION ENGINES
@@ -157,20 +216,36 @@ async def scrape_website_cases():
                 if "adama" in raw_string_dump:
                     case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
                     
-                    # Run deep JSON string sanitization
+                    # 1. CLEAN EXTRACTION FOR BANK, BRANCH & TERMINAL
                     bank = extract_field(entry.get('bank'), 'bank') or extract_field(entry, 'bank')
                     branch = extract_field(entry.get('branch'), 'branch') or extract_field(entry, 'branch')
                     terminal = extract_field(entry.get('terminal'), 'terminal') or extract_field(entry, 'terminal')
-                    issue = entry.get('description') or entry.get('issue') or "N/A"
-                    technician = extract_field(entry.get('technician'), 'name') or extract_field(entry, 'technician')
-                    tech_phone = extract_field(entry.get('technician'), 'phone') or "N/A"
+                    
+                    # 2. ROBUST ISSUE (DESCRIPTION) SEARCH
+                    issue = entry.get('description') or entry.get('issue') or entry.get('issue_description') or entry.get('title') or "N/A"
+                    
+                    # 3. ROBUST TECHNICIAN SEARCH (Checks sub-objects and combinations)
+                    tech_obj = entry.get('technician') or entry.get('user') or {}
+                    technician = ""
+                    if isinstance(tech_obj, dict):
+                        technician = extract_field(tech_obj, 'technician')
+                    if not technician:
+                        technician = extract_field(entry, 'technician') or "Assigned Tech"
+                        
+                    # 4. ROBUST PHONE SEARCH
+                    tech_phone = "N/A"
+                    if isinstance(tech_obj, dict):
+                        tech_phone = tech_obj.get('phone') or tech_obj.get('mobile') or tech_obj.get('phone_number') or "N/A"
+                    if tech_phone == "N/A":
+                        tech_phone = entry.get('tech_phone') or entry.get('phone') or "N/A"
+                        
                     comment = entry.get('comment', 'No comments.')
                     district = "Adama"
                     
-                    created_at = entry.get('created_at', entry.get('start_date', ''))
-                    date_str = str(created_at)[:10] if created_at else "N/A"
+                    # 5. ROBUST REPORTED DATE SEARCH
+                    created_at = entry.get('created_at') or entry.get('reported_at') or entry.get('start_date') or ''
+                    date_str = str(created_at)[:16].replace("T", " ") if created_at else "N/A"
                     
-                    # Parse timestamp strictly safely for duration sorting
                     try:
                         date_obj = datetime.strptime(str(created_at)[:19], "%Y-%m-%dT%H:%M:%S")
                     except Exception:
@@ -179,8 +254,25 @@ async def scrape_website_cases():
                         except Exception:
                             date_obj = datetime.now()
 
-                    status_raw = str(entry.get('status', entry.get('progress', 'Pending'))).lower()
-                    status_text = "Completed" if status_raw in ["complete", "completed", "1", "done"] else "Pending"
+                    # 6. ADVANCED STATUS RESOLUTION (FIX FOR COMPLETED CASES SHOWING PENDING)
+                    status_raw = str(entry.get('status', '')).strip().lower()
+                    progress_raw = str(entry.get('progress', '')).strip().lower()
+                    is_closed_val = entry.get('is_closed')
+                    
+                    closed_keywords = ["complete", "completed", "done", "close", "closed", "resolved", "terminated", "success", "success-closed"]
+                    
+                    is_completed = False
+                    # Check status string
+                    if any(kw in status_raw for kw in closed_keywords):
+                        is_completed = True
+                    # Check progress string
+                    elif any(kw in progress_raw for kw in closed_keywords):
+                        is_completed = True
+                    # Check boolean status
+                    elif is_closed_val is True or str(is_closed_val).lower() in ['true', '1', 'yes']:
+                        is_completed = True
+
+                    status_text = "Completed" if is_completed else "Pending"
 
                     scraped_cases.append({
                         'case_id': case_id,
@@ -191,7 +283,7 @@ async def scrape_website_cases():
                         'issue': issue,
                         'status': status_text,
                         'comment': comment,
-                        'technician': technician if technician else "Assigned Tech",
+                        'technician': technician,
                         'tech_phone': tech_phone,
                         'date': date_str,
                         'date_obj': date_obj
@@ -203,9 +295,6 @@ async def scrape_website_cases():
             return [], f"Scraper Exception: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
-    """
-    Connects to target API, authenticates safely and updates case status to close.
-    """
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
     login_url = "https://api.tech24et.com/api/login"
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
@@ -220,19 +309,16 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0, verify=False) as client:
         try:
-            # Prepare Session cookies
             await client.get(csrf_url)
             xsrf_token = client.cookies.get("XSRF-TOKEN")
             if xsrf_token:
                 client.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
 
-            # Authenticate Session
             payload = {"email": EMAIL.strip(), "password": PASSWORD.strip()}
             login_res = await client.post(login_url, json=payload)
             if login_res.status_code not in [200, 201, 204]:
                 return False, f"Auth Error status: {login_res.status_code}"
 
-            # Post action update
             res = await client.post(terminate_url, json={})
             if res.status_code in [200, 204]:
                 return True, "Successfully Closed"
@@ -269,9 +355,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not new_pending_cases:
         return
 
-    # Trigger custom dynamic layouts based on the count of new cases
     if len(new_pending_cases) == 1:
-        # Single case: Send rich text card + operational action buttons (Photo 2 style)
         case = new_pending_cases[0]
         text, kb = build_case_detail_ui(case)
         await context.bot.send_message(
@@ -281,11 +365,12 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        # Multiple cases: Send a condensed navigation menu (Photo 3 style)
-        text = f"🚨 *{len(new_pending_cases)} New Pending Cases Detected!*\nSelect a case button below to view details and action buttons:"
+        text = f"🚨 *{len(new_pending_cases)} New Pending Cases Detected!*\nSelect a case button below to view details and actions:"
         keyboard = []
         for case in new_pending_cases:
-            button_label = f"🏧 {case['bank']} - {case['branch']} (ID: {case['case_id']})"
+            clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+            clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+            button_label = f"🏧 {clean_bank} - {clean_branch} (ID: {case['case_id']})"
             keyboard.append([InlineKeyboardButton(button_label, callback_data=f"view_{case['case_id']}")])
         
         await context.bot.send_message(
@@ -299,19 +384,29 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 # 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
-    """
-    Renders clean, structured layout fields without any nested raw JSON strings.
-    """
+    # Deep extract and clean all fields for the interface
+    clean_bank = extract_field(case['bank'], 'bank') or str(case['bank'])
+    clean_branch = extract_field(case['branch'], 'branch') or str(case['branch'])
+    clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number') or str(case['terminal'])
+    clean_tech = extract_field(case['technician'], 'technician') or str(case['technician'])
+
+    # Safely escape text to avoid Markdown parsing exceptions
+    safe_bank = clean_bank.replace("_", "\\_").replace("*", "\\*")
+    safe_branch = clean_branch.replace("_", "\\_").replace("*", "\\*")
+    safe_terminal = clean_terminal.replace("_", "\\_").replace("*", "\\*")
+    safe_issue = str(case['issue']).replace("_", "\\_").replace("*", "\\*")
+    safe_tech = clean_tech.replace("_", "\\_").replace("*", "\\*")
+    
     text = (
         f"📋 *Case ID:* `{case['case_id']}`\n"
-        f"🏧 *Terminal ID:* {case['terminal']}\n"
-        f"🏛 *Bank:* {case['bank']}\n"
-        f"📍 *Branch:* {case['branch']}\n"
-        f"⚠️ *Issue Description:* {case['issue']}\n"
+        f"🏧 *Terminal:* {safe_terminal}\n"
+        f"🏛 *Bank:* {safe_bank}\n"
+        f"📍 *Branch:* {safe_branch}\n"
+        f"⚠️ *Issue:* {safe_issue}\n"
         f"📌 *Status:* {case['status']}\n"
         f"🌍 *District:* {case['district']}\n"
         f"💬 *Comment:* {case['comment']}\n"
-        f"👤 *Assigned Tech:* {case['technician']}\n"
+        f"👤 *Technician:* {safe_tech}\n"
         f"📞 *Tech Phone:* {case['tech_phone']}\n"
         f"📅 *Reported At:* {case['date']} (EAT)\n"
     )
@@ -328,15 +423,6 @@ def build_case_detail_ui(case):
 # 7. EXCEL & REPORT ENGINE GENERATORS
 # ==========================================
 def format_summary_report(cases, days_limit=7, title="Weekly"):
-    """
-    Outputs the exact visual format:
-    🏧 Weekly report/yared Girma/
-    ®15/06/2025 Registered |Dabe Soloke Branch |Awash Bank|(SLLS belt problem)|Completed
-    ...
-    Generally
-    🏛 Awash Registered Completed -2
-    🏛 Dashen Registered Completed -1
-    """
     now = datetime.now()
     cutoff_date = now - timedelta(days=days_limit)
     filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
@@ -344,29 +430,28 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
     if not filtered_cases:
         return f"📭 No cases recorded on dashboard in the past {days_limit} days."
 
-    # Top Header Lines
-    report_lines = [f"🏧 *{title} Report/yared Girma/*\n"]
+    report_lines = [f"🏧 *{title} Report /Yared Girma/*\n"]
 
-    # Individual Case String Outputs
     for case in filtered_cases:
-        # Convert date safely to the user's custom formatting (DD/MM/YYYY)
         try:
             date_formatted = case['date_obj'].strftime("%d/%m/%Y")
         except Exception:
             date_formatted = case['date']
             
+        clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+        clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+
         case_string = (
-            f"®️ *{date_formatted}* Registered | {case['branch']} | "
-            f"{case['bank']} | ({case['issue']}) | {case['status']}"
+            f"®️ *{date_formatted}* Registered | {clean_branch} | "
+            f"{clean_bank} | ({case['issue']}) | {case['status']}"
         )
         report_lines.append(case_string)
 
     report_lines.append("\n*Generally*")
 
-    # Group metrics by Bank
     bank_analytics = {}
     for case in filtered_cases:
-        b_name = case['bank']
+        b_name = extract_field(case['bank'], 'bank') or case['bank']
         if b_name not in bank_analytics:
             bank_analytics[b_name] = {"registered": 0, "completed": 0}
         
@@ -375,22 +460,17 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
             bank_analytics[b_name]["completed"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        # Render clean consolidated metrics
-        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed -{stats['completed']}"
+        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed - {stats['completed']}"
         report_lines.append(summary_line)
 
     return "\n".join(report_lines)
 
 def generate_excel_bytes(cases):
-    """
-    Writes dynamic case logs to memory buffer formatted as clean Excel rows.
-    """
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Incident Log Database"
     ws.views.sheetView[0].showGridLines = True
 
-    # Styling Palettes
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     data_font = Font(name="Calibri", size=10, bold=False, color="000000")
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -407,25 +487,27 @@ def generate_excel_bytes(cases):
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Write normalized rows
     for row_idx, case in enumerate(cases, start=2):
+        clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+        clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+        clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number') or case['terminal']
+        clean_tech = extract_field(case['technician'], 'technician') or case['technician']
+
         row_data = [
-            case['case_id'], case['terminal'], case['bank'], case['branch'],
+            case['case_id'], clean_terminal, clean_bank, clean_branch,
             case['issue'], case['status'], case['district'], case['comment'],
-            case['technician'], case['tech_phone'], case['date']
+            clean_tech, case['tech_phone'], case['date']
         ]
         ws.append(row_data)
         for col_num in range(1, len(headers) + 1):
             cell = ws.cell(row=row_idx, column=col_num)
             cell.font = data_font
             cell.border = grid_border
-            # Align strings depending on content type
             if col_num in [1, 2, 6, 10, 11]:
                 cell.alignment = Alignment(horizontal="center")
             else:
                 cell.alignment = Alignment(horizontal="left")
 
-    # Adjust columns widths to match sizes dynamically
     for col in ws.columns:
         max_len = 0
         col_letter = col[0].column_letter
@@ -468,16 +550,16 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pending_cases:
         return await update.message.reply_text("✅ *Awesome!* No unresolved cases in Adama dashboard.", parse_mode="Markdown")
 
-    # Dynamic UI display
     if len(pending_cases) == 1:
         text, kb = build_case_detail_ui(pending_cases[0])
         await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
     else:
-        # Multiple cases navigation layout (Photo 3)
         text = f"📋 *Adama Active Logs ({len(pending_cases)} Pending)*\nSelect a button to view specific case actions:"
         keyboard = []
         for c in pending_cases:
-            button_lbl = f"🏧 {c['bank']} - {c['branch']} (ID: {c['case_id']})"
+            clean_bank = extract_field(c['bank'], 'bank') or c['bank']
+            clean_branch = extract_field(c['branch'], 'branch') or c['branch']
+            button_lbl = f"🏧 {clean_bank} - {clean_branch} (ID: {c['case_id']})"
             keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"view_{c['case_id']}")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -497,7 +579,9 @@ async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛑 *Select Case ID to terminate/complete:* "
     keyboard = []
     for c in pending_cases:
-        button_lbl = f"Case {c['case_id']} - {c['bank']} ({c['branch']})"
+        clean_bank = extract_field(c['bank'], 'bank') or c['bank']
+        clean_branch = extract_field(c['branch'], 'branch') or c['branch']
+        button_lbl = f"Case {c['case_id']} - {clean_bank} ({clean_branch})"
         keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"terminate_{c['case_id']}")])
     
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -560,7 +644,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # User clicks on specific detailed view button from navigation lists
     if data.startswith("view_"):
         case_id = data.split("_")[1]
         cases, status = await scrape_website_cases()
@@ -574,7 +657,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
 
-    # User clicks on refresh inside detailed card UI
     elif data.startswith("refresh_"):
         case_id = data.split("_")[2] if len(data.split("_")) == 3 else data.split("_")[1]
         cases, status = await scrape_website_cases()
@@ -588,7 +670,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(f"🔄 *Refreshed at:* {datetime.now().strftime('%H:%M:%S')}\n\n{text}", reply_markup=kb, parse_mode="Markdown")
 
-    # User clicks on direct terminate action
     elif data.startswith("terminate_"):
         case_id = data.split("_")[1]
         await query.edit_message_text(f"⏳ Attempting terminal state authorization closure for Case ID `{case_id}`...", parse_mode="Markdown")
@@ -597,7 +678,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if success:
             await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated on active dashboard database.", parse_mode="Markdown")
         else:
-            # Add fallback quick closure option buttons in case of failure
             keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data=f"terminate_{case_id}")],
                         [InlineKeyboardButton("❌ Dismiss Panel", callback_data="cancel_action")]]
             await query.edit_message_text(
@@ -607,13 +687,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
 # ==========================================
-# 10. CRITICAL STARTUP ENGLISH MENU INITIALIZER
+# 10. STARTUP ENGLISH MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
-    """
-    Invoked once during startup to safely overwrite default system menu actions
-    to English directly over Telegram Bot API servers.
-    """
     logger.info("Setting bot command definitions cleanly to English layout during startup sequence...")
     commands = [
         BotCommand("start", "Initialize bot profile"),
@@ -634,13 +710,10 @@ def main():
         logger.error("SYSTEM ERROR: TELEGRAM_BOT_TOKEN environment variable is missing.")
         return
 
-    # Start Flask Web Health Check for keeping UptimeRobot alive on background thread
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # Build Application client with correct startup sequences
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Connect Command actions
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("terminate", terminate_command))
@@ -648,15 +721,12 @@ def main():
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
     
-    # Connect interactive callback buttons
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    # Configure background loop task to run every 600 seconds (10 minutes)
     job_queue = application.job_queue
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
     logger.info("Auto-monitor dashboard background task configured to cycle every 10 minutes.")
 
-    # Start polling
     logger.info("Bot application polling successfully initiated.")
     application.run_polling()
 
