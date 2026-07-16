@@ -3,7 +3,7 @@ import logging
 import asyncio
 import threading
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from flask import Flask
 import httpx
@@ -59,7 +59,7 @@ def extract_field(item, keyword):
     return ""
 
 # ==========================================
-# 5. DASHBOARD API SCRAPING & MUTATION
+# 5. DASHBOARD API SCRAPING & MUTATION (CORRECTED)
 # ==========================================
 async def scrape_website_cases():
     """Authenticates and pulls active ATM cases from the tech24et dashboard."""
@@ -71,7 +71,7 @@ async def scrape_website_cases():
     api_url = 'https://api.tech24et.com/api/callentries?limit=200'
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
         'Origin': 'https://tech24et.com',
@@ -80,19 +80,40 @@ async def scrape_website_cases():
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
         try:
-            # 1. Fetch CSRF token
+            # 1. Fetch CSRF cookie
             await session.get(csrf_url)
+            
+            # Extract CSRF token properly from the cookie jar
             xsrf_token = session.cookies.get("XSRF-TOKEN")
-            if xsrf_token: 
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+            if not xsrf_token:
+                for cookie in session.cookies:
+                    if cookie.name == 'XSRF-TOKEN':
+                        xsrf_token = cookie.value
+                        break
 
-            # 2. Login
+            if xsrf_token: 
+                decoded_token = urllib.parse.unquote(xsrf_token)
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_token,
+                    'X-CSRF-TOKEN': decoded_token
+                })
+
+            # 2. Perform Login Request
             login_payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
             login_res = await session.post(login_url, json=login_payload)
             if login_res.status_code not in [200, 201, 204]: 
-                return [], f"Login failed with status code {login_res.status_code}"
+                return [], f"Login failed with status {login_res.status_code}"
 
-            # 3. Fetch Case Entries
+            # 3. Refresh CSRF token for the authenticated session
+            updated_xsrf = session.cookies.get("XSRF-TOKEN")
+            if updated_xsrf:
+                decoded_updated = urllib.parse.unquote(updated_xsrf)
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_updated,
+                    'X-CSRF-TOKEN': decoded_updated
+                })
+
+            # 4. Fetch the Case Entries
             response = await session.get(api_url)
             if response.status_code != 200: 
                 return [], f"Failed to fetch data. Status: {response.status_code}"
@@ -131,12 +152,15 @@ async def scrape_website_cases():
 
 async def terminate_case_on_dashboard(case_id):
     """Sends patch/close request to terminate/complete a specific case on the remote dashboard."""
+    if not EMAIL or not PASSWORD:
+        return False
+
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
         'Origin': 'https://tech24et.com',
@@ -145,22 +169,31 @@ async def terminate_case_on_dashboard(case_id):
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0, verify=False) as session:
         try:
-            # Prepare session tokens
+            # 1. Fetch CSRF Token
             await session.get(csrf_url)
             xsrf = session.cookies.get("XSRF-TOKEN")
             if xsrf: 
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf)})
+                decoded_xsrf = urllib.parse.unquote(xsrf)
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_xsrf,
+                    'X-CSRF-TOKEN': decoded_xsrf
+                })
                 
-            # Log in to authorize session
+            # 2. Authorize session via login
             login_res = await session.post(login_url, json={'email': EMAIL.strip(), 'password': PASSWORD.strip()})
             if login_res.status_code not in [200, 201, 204]:
                 return False
             
-            # Re-verify XSRF to prevent session mismatches on the mutative endpoint
+            # 3. Re-verify XSRF token for mutative endpoint protection
             updated_xsrf = session.cookies.get("XSRF-TOKEN")
             if updated_xsrf:
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(updated_xsrf)})
+                decoded_updated = urllib.parse.unquote(updated_xsrf)
+                session.headers.update({
+                    'X-XSRF-TOKEN': decoded_updated,
+                    'X-CSRF-TOKEN': decoded_updated
+                })
                 
+            # 4. Dispatch status change
             res = await session.post(terminate_url, json={'status': 'completed'})
             return res.status_code in [200, 201, 204]
         except Exception as e:
