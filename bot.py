@@ -91,7 +91,7 @@ def extract_field(item, keyword):
                     return v.get('name', v.get('title', str(v)))
                 return str(v)
         # Fallbacks for dictionary
-        for fallback in ['name', 'title', 'bank_name', 'branch_name']:
+        for fallback in ['name', 'title', 'bank_name', 'branch_name', 'terminal_id', 'serial_number']:
             if fallback in item:
                 return str(item[fallback])
         return str(item)
@@ -105,7 +105,7 @@ def extract_field(item, keyword):
             if parsed and isinstance(parsed, dict):
                 return extract_field(parsed, keyword)
         
-        # If it's a plain string, return it directly (solves the plain string deletion bug)
+        # If it's a plain string, return it directly
         return item_stripped
             
     return str(item)
@@ -187,8 +187,22 @@ async def scrape_website_cases():
                         except Exception:
                             date_obj = datetime.now()
 
-                    status_raw = str(entry.get('status', entry.get('progress', 'Pending'))).lower()
-                    status_text = "Completed" if status_raw in ["complete", "completed", "1", "done"] else "Pending"
+                    # --- CRITICAL BUG FIX FOR STATUS CLASSIFICATION ---
+                    status_raw = extract_field(entry.get('status'), 'status') or str(entry.get('status', ''))
+                    status_raw = status_raw.strip().lower()
+                    progress_raw = str(entry.get('progress', '')).strip().lower()
+                    
+                    # Check if status indicates closed or completed
+                    closed_keywords = ["complete", "completed", "done", "close", "closed", "resolved", "terminated", "success"]
+                    
+                    is_completed = False
+                    if any(kw in status_raw for kw in closed_keywords) or any(kw in progress_raw for kw in closed_keywords):
+                        is_completed = True
+                    elif entry.get('is_closed') is True or str(entry.get('is_closed')).lower() in ['true', '1']:
+                        is_completed = True
+
+                    status_text = "Completed" if is_completed else "Pending"
+                    # --------------------------------------------------
 
                     scraped_cases.append({
                         'case_id': case_id,
@@ -299,15 +313,28 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 # 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
+    # CRITICAL UI CLEANING FIX: Extract clean strings for separate detail view
+    clean_bank = extract_field(case['bank'], 'bank')
+    clean_branch = extract_field(case['branch'], 'branch')
+    clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number')
+    clean_tech = extract_field(case['technician'], 'name')
+
+    # Fallback to current values if clean fails
+    clean_bank = clean_bank if clean_bank else case['bank']
+    clean_branch = clean_branch if clean_branch else case['branch']
+    clean_terminal = clean_terminal if clean_terminal else case['terminal']
+    clean_tech = clean_tech if clean_tech else case['technician']
+
     # Safely escape text to avoid Markdown parsing exceptions
-    safe_bank = case['bank'].replace("_", "\\_").replace("*", "\\*")
-    safe_branch = case['branch'].replace("_", "\\_").replace("*", "\\*")
+    safe_bank = clean_bank.replace("_", "\\_").replace("*", "\\*")
+    safe_branch = clean_branch.replace("_", "\\_").replace("*", "\\*")
+    safe_terminal = clean_terminal.replace("_", "\\_").replace("*", "\\*")
     safe_issue = case['issue'].replace("_", "\\_").replace("*", "\\*")
-    safe_tech = case['technician'].replace("_", "\\_").replace("*", "\\*")
+    safe_tech = clean_tech.replace("_", "\\_").replace("*", "\\*")
     
     text = (
         f"📋 *Case ID:* `{case['case_id']}`\n"
-        f"🏧 *Terminal:* {case['terminal']}\n"
+        f"🏧 *Terminal:* {safe_terminal}\n"
         f"🏛 *Bank:* {safe_bank}\n"
         f"📍 *Branch:* {safe_branch}\n"
         f"⚠️ *Issue:* {safe_issue}\n"
@@ -346,9 +373,12 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
         except Exception:
             date_formatted = case['date']
             
+        clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+        clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+
         case_string = (
-            f"®️ *{date_formatted}* Registered | {case['branch']} | "
-            f"{case['bank']} | ({case['issue']}) | {case['status']}"
+            f"®️ *{date_formatted}* Registered | {clean_branch} | "
+            f"{clean_bank} | ({case['issue']}) | {case['status']}"
         )
         report_lines.append(case_string)
 
@@ -356,7 +386,7 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
 
     bank_analytics = {}
     for case in filtered_cases:
-        b_name = case['bank']
+        b_name = extract_field(case['bank'], 'bank') or case['bank']
         if b_name not in bank_analytics:
             bank_analytics[b_name] = {"registered": 0, "completed": 0}
         
@@ -365,7 +395,7 @@ def format_summary_report(cases, days_limit=7, title="Weekly"):
             bank_analytics[b_name]["completed"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed -{stats['completed']}"
+        summary_line = f"🏛 *{bank_name}* Registered {stats['registered']}  |  Completed - {stats['completed']}"
         report_lines.append(summary_line)
 
     return "\n".join(report_lines)
@@ -393,10 +423,15 @@ def generate_excel_bytes(cases):
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for row_idx, case in enumerate(cases, start=2):
+        clean_bank = extract_field(case['bank'], 'bank') or case['bank']
+        clean_branch = extract_field(case['branch'], 'branch') or case['branch']
+        clean_terminal = extract_field(case['terminal'], 'terminal') or extract_field(case['terminal'], 'serial_number') or case['terminal']
+        clean_tech = extract_field(case['technician'], 'name') or case['technician']
+
         row_data = [
-            case['case_id'], case['terminal'], case['bank'], case['branch'],
+            case['case_id'], clean_terminal, clean_bank, clean_branch,
             case['issue'], case['status'], case['district'], case['comment'],
-            case['technician'], case['tech_phone'], case['date']
+            clean_tech, case['tech_phone'], case['date']
         ]
         ws.append(row_data)
         for col_num in range(1, len(headers) + 1):
@@ -457,7 +492,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"📋 *Adama Active Logs ({len(pending_cases)} Pending)*\nSelect a button to view specific case actions:"
         keyboard = []
         for c in pending_cases:
-            button_lbl = f"🏧 {c['bank']} - {c['branch']} (ID: {c['case_id']})"
+            clean_bank = extract_field(c['bank'], 'bank') or c['bank']
+            clean_branch = extract_field(c['branch'], 'branch') or c['branch']
+            button_lbl = f"🏧 {clean_bank} - {clean_branch} (ID: {c['case_id']})"
             keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"view_{c['case_id']}")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -477,7 +514,9 @@ async def terminate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛑 *Select Case ID to terminate/complete:* "
     keyboard = []
     for c in pending_cases:
-        button_lbl = f"Case {c['case_id']} - {c['bank']} ({c['branch']})"
+        clean_bank = extract_field(c['bank'], 'bank') or c['bank']
+        clean_branch = extract_field(c['branch'], 'branch') or c['branch']
+        button_lbl = f"Case {c['case_id']} - {clean_bank} ({clean_branch})"
         keyboard.append([InlineKeyboardButton(button_lbl, callback_data=f"terminate_{c['case_id']}")])
     
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
