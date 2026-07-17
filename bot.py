@@ -195,32 +195,51 @@ async def scrape_website_cases():
 
                     technician = entry.get('assigned_eng', 'Not Assigned')
                     if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
+                        tech_obj = entry.get('Technician') or entry.get('technician') or {}
+                        if isinstance(tech_obj, dict):
+                            technician = tech_obj.get('assigned_eng', 'Not Assigned')
+
+                    if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
                         technician = "Not Assigned"
                     
                     tech_phone = entry.get('assigned_phone', '-')
                     if not tech_phone:
                         tech_phone = "-"
 
-                    # Fixed Robust Parsing of Registration Date
-                    created_at = entry.get('created_at')
+                    # =========================================================
+                    # 🛠 ትክክለኛውን የተመዘገበበት ቀን ፍለጋ ማስተካከያ (FIXED DATE PARSING)
+                    # =========================================================
+                    created_at = entry.get('created_at') or entry.get('Reported At')
+                    if not created_at:
+                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
+                        if isinstance(tech_folder, dict):
+                            created_at = tech_folder.get('created_at')
+
                     date_obj = None
                     date_str = "N/A"
                     
                     if created_at:
-                        clean_time_str = str(created_at).replace("T", " ").split(".")[0]
-                        date_str = clean_time_str[:19]
-                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                        date_str = str(created_at).strip()
+                        for fmt in ("%d/%m/%Y %I:%M %p", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
                             try:
-                                date_obj = datetime.strptime(date_str[:len(fmt)-2] if len(date_str) > len(fmt) else date_str, fmt)
+                                clean_time_str = date_str.split(".")[0]
+                                date_obj = datetime.strptime(clean_time_str, fmt)
                                 break
                             except ValueError:
                                 continue
                                 
                     if not date_obj:
                         date_obj = datetime.now()
-                        date_str = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+                        date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
+                    else:
+                        date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
 
                     status_raw = str(entry.get('callentry_status', '')).lower()
+                    if not status_raw:
+                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
+                        if isinstance(tech_folder, dict):
+                            status_raw = str(tech_folder.get('callentry_status', '')).lower()
+
                     if status_raw in ["complete", "completed", "done", "1"]:
                         status_text = "Completed"
                     else:
@@ -281,7 +300,7 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC PENDING MONITOR (ALARM SENDS FOR ALL NEW ONGOING)
+# 5. AUTOMATIC PENDING MONITOR (10-MIN FRESH)
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
@@ -293,9 +312,12 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     
+    now = datetime.now()
+    ten_minutes_ago = now - timedelta(minutes=12)
+
     new_pending_cases = []
     for c in pending_cases:
-        if c['case_id'] not in SENT_CASES_TRACKER:
+        if c['date_obj'] >= ten_minutes_ago and c['case_id'] not in SENT_CASES_TRACKER:
             new_pending_cases.append(c)
             SENT_CASES_TRACKER.add(c['case_id'])
 
@@ -304,14 +326,14 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 
     for case in new_pending_cases:
         notif_text = (
-            f"📋 *Adama District Incident Notification* 📋\n\n"
-            f"1. ID: {case['case_id']}\n"
-            f"🏦 Bank: {case['bank']} ({case['branch']})\n"
-            f"⚠️ Issue: {case['issue']}\n"
-            f"📅 Date: {case['date_obj'].strftime('%d/%m/%Y')}\n"
-            f"📌 Status: ⏳ On going\n"
-            f"💬 Comment: {case['comment']}\n"
-            f"--------------------------------"
+            f"*ATM Incident Notification*\n\n"
+            f"📄 *ID:* {case['case_id']},\n"
+            f"🏦 *Bank:* {case['bank']},\n"
+            f"⚠️ *Issue:* {case['issue']},\n"
+            f"🏢 *Branch:* {case['branch']},\n"
+            f"📍 *District:* {case['district']},\n"
+            f"💬 *Comment:* {case['comment']},\n"
+            f"🕒 *Reported at:* {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')}"
         )
         
         kb = InlineKeyboardMarkup([
@@ -329,6 +351,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
 # 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
+    relative_long, _ = get_relative_time(case['date_obj'])
     text = (
         f"Case ID: {case['case_id']}\n"
         f"Terminal: {case['terminal']}\n"
@@ -339,7 +362,8 @@ def build_case_detail_ui(case):
         f"District: {case['district']}\n"
         f"Comment: {case['comment']}\n"
         f"Technician: {case['technician']}\n"
-        f"Reported At: {case['date_raw']} (East Africa Time)"
+        f"Reported At: {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')} (East Africa Time)\n"
+        f"Relative Time: {relative_long}"
     )
     
     keyboard = [
@@ -353,7 +377,7 @@ def build_case_detail_ui(case):
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
 def format_technician_weekly_report(cases, selected_tech):
-    """Generates a clear report for a specific technician with the registered registration dates"""
+    """የዚህኑ ሳምንት ሰኞ-ቅዳሜ ብቻ በጥብቅ ለይቶ የሚያወጣ ማጣሪያ (ምስል 3498 ዲዛይን)"""
     now = datetime.now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -365,41 +389,57 @@ def format_technician_weekly_report(cases, selected_tech):
     ]
 
     if not filtered_cases:
-        return f"📭 No cases recorded on dashboard for *{selected_tech}* from Monday to Saturday."
+        return f"📭 No cases recorded on dashboard for *{selected_tech}* from Monday to Saturday this week."
 
-    report_lines = f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n\n"
-    actual_lines = []
+    report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
 
     for idx, c in enumerate(filtered_cases, start=1):
-        try:
-            date_formatted = c['date_obj'].strftime("%d/%m/%Y")
-        except Exception:
-            date_formatted = c['date_raw'][:10]
-            
-        status_emoji = "✅" if c['status'] == "Completed" else "⏳"
+        date_formatted = c['date_obj'].strftime("%d/%m/%Y")
+        status_emoji = "✅ Completed" if c['status'] == "Completed" else "⏳ On going"
         
         line = (
             f"{idx}. ID: {c['case_id']}\n"
             f"🏦 Bank: {c['bank']} ({c['branch']} branch)\n"
             f"⚠️ Issue: {c['issue']}\n"
             f"📅 Date: {date_formatted}\n"
-            f"📌 Status: {status_emoji} {c['status']}\n"
-            f"--------------------------------"
+            f"📌 Status: {status_emoji}\n"
+            f"----------------------------------------"
         )
-        actual_lines.append(line)
+        report_lines.append(line)
 
-    report_lines += "\n".join(actual_lines)
-    return report_lines
+    # Generally ማጠቃለያ ስሌት
+    report_lines.append("\n        *Generally*")
+    bank_analytics = {}
+    for case in filtered_cases:
+        b_name = case['bank']
+        if b_name not in bank_analytics:
+            bank_analytics[b_name] = {"completed": 0, "ongoing": 0}
+        
+        if case['status'] == "Completed":
+            bank_analytics[b_name]["completed"] += 1
+        else:
+            bank_analytics[b_name]["ongoing"] += 1
+
+    for bank_name, stats in bank_analytics.items():
+        report_lines.append(f"*{bank_name} bank*")
+        report_lines.append(f"    Completed-{stats['completed']}")
+        report_lines.append(f"    On going-{stats['ongoing']}")
+
+    return "\n".join(report_lines)
 
 def format_monthly_report_matrix(cases):
+    """ወርሃዊውም ማትሪክስ ቢሆን ልክ እንደ ሳምንታዊው የዚህን ሳምንት ሰኞ-ቅዳሜ ብቻ ያሰላል"""
     now = datetime.now()
-    cutoff_date = now - timedelta(days=30)
-    filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
+    start_of_week = now - timedelta(days=now.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
+
+    filtered_cases = [c for c in cases if start_of_week <= c['date_obj'] <= end_of_week]
 
     if not filtered_cases:
-        return "📭 No cases recorded on dashboard for this monthly timeframe."
+        return "📭 No cases recorded on dashboard for this current week timeframe."
 
-    report_lines = ["📋 *Monthly report of matrix* 📋\n"]
+    report_lines = ["📋 *Monthly report of matrix (This Week Only)* 📋\n"]
 
     tech_stats = {}
     total_completed = 0
@@ -702,7 +742,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. STARTUP MENU INITIALIZER (STRUCTURE REMOVED)
+# 10. STARTUP MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
