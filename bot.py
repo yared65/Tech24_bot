@@ -206,9 +206,6 @@ async def scrape_website_cases():
                     if not tech_phone:
                         tech_phone = "-"
 
-                    # =========================================================
-                    # 🛠 ትክክለኛውን የተመዘገበበት ቀን ፍለጋ ማስተካከያ (FIXED DATE PARSING)
-                    # =========================================================
                     created_at = entry.get('created_at') or entry.get('Reported At')
                     if not created_at:
                         tech_folder = entry.get('Technician') or entry.get('technician') or {}
@@ -377,7 +374,6 @@ def build_case_detail_ui(case):
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
 def format_technician_weekly_report(cases, selected_tech):
-    """የዚህኑ ሳምንት ሰኞ-ቅዳሜ ብቻ በጥብቅ ለይቶ የሚያወጣ ማጣሪያ (ምስል 3498 ዲዛይን)"""
     now = datetime.now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -407,7 +403,6 @@ def format_technician_weekly_report(cases, selected_tech):
         )
         report_lines.append(line)
 
-    # Generally ማጠቃለያ ስሌት
     report_lines.append("\n        *Generally*")
     bank_analytics = {}
     for case in filtered_cases:
@@ -427,8 +422,8 @@ def format_technician_weekly_report(cases, selected_tech):
 
     return "\n".join(report_lines)
 
-def format_monthly_report_matrix(cases):
-    """ወርሃዊውም ማትሪክስ ቢሆን ልክ እንደ ሳምንታዊው የዚህን ሳምንት ሰኞ-ቅዳሜ ብቻ ያሰላል"""
+def format_weekly_summary_matrix(cases):
+    """የዚህን ሳምንት ሰኞ-ቅዳሜ ብቻ ያሰላል (Weekly Matrix Summary)"""
     now = datetime.now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -439,7 +434,7 @@ def format_monthly_report_matrix(cases):
     if not filtered_cases:
         return "📭 No cases recorded on dashboard for this current week timeframe."
 
-    report_lines = ["📋 *Monthly report of matrix (This Week Only)* 📋\n"]
+    report_lines = ["📋 *Weekly Summary Report of Matrix* 📋\n"]
 
     tech_stats = {}
     total_completed = 0
@@ -541,8 +536,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
         "💻 *Available Commands Menu:*\n"
         "• /pending - View currently open / unresolved cases\n"
-        "• /report - View weekly performance metrics\n"
-        "• /monthly - View monthly performance metrics\n"
+        "• /report - View weekly performance metrics by technician\n"
+        "• /summary - View overall weekly matrix summary\n"
         "• /export - Download structured incident Excel spreadsheets"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -601,7 +596,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
@@ -610,7 +605,7 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    report_text = format_monthly_report_matrix(cases)
+    report_text = format_weekly_summary_matrix(cases)
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -748,8 +743,8 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Initialize bot profile"),
         BotCommand("pending", "View open and unresolved cases"),
-        BotCommand("report", "View weekly performance metrics"),
-        BotCommand("monthly", "View monthly performance metrics"),
+        BotCommand("report", "View weekly technician performance metrics"),
+        BotCommand("summary", "View overall weekly summary metrics"),
         BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
@@ -769,7 +764,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("report", report_command))
-    application.add_handler(CommandHandler("monthly", monthly_command))
+    application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("export", export_command))
     
     application.add_handler(CallbackQueryHandler(button_click_handler))
