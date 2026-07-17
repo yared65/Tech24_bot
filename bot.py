@@ -28,6 +28,9 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
+# 🚨 MAINTENANCE SWITCH (Set to False to turn the bot back on normally)
+MAINTENANCE_MODE = True
+
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
 if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
     try:
@@ -300,6 +303,10 @@ async def terminate_case_on_dashboard(case_id):
 # 5. AUTOMATIC PENDING MONITOR (10-MIN FRESH)
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
+    # If system is down for maintenance, suspend automatic tracking messages
+    if MAINTENANCE_MODE:
+        return
+
     if not NOTIFICATION_CHAT_ID:
         return
 
@@ -343,6 +350,19 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb,
             parse_mode="Markdown"
         )
+
+# ==========================================
+# 5.5 GLOBAL MAINTENANCE RESPONSE GENERATOR
+# ==========================================
+def get_maintenance_message():
+    return (
+        "🚨 *SYSTEM NOTICE / MAINTENANCE ALERT* 🚨\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚠️ *For All bot user !!!*\n"
+        "The bot was under maintenance and we working on to getback to work please be patient 🙏 🙏🙏 Thank you for understanding us \n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🛠️ _Status: Upgrading systems & optimization ongoing_"
+    )
 
 # ==========================================
 # 6. DYNAMIC UI BUILDERS
@@ -455,7 +475,7 @@ def format_weekly_summary_matrix(cases):
             total_ongoing += 1
 
     for tech, stats in tech_stats.items():
-        report_lines.append(f"👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
+        report_lines.append(f"Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.")
 
     report_lines.append("")
     total_cases = total_completed + total_ongoing
@@ -532,6 +552,9 @@ def generate_excel_bytes(cases):
 # 8. TELEGRAM COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
     welcome_text = (
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
         "💻 *Available Commands Menu:*\n"
@@ -543,6 +566,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
@@ -574,6 +600,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
     processing = await update.message.reply_text("⏳ Processing weekly active configurations, please wait...")
     cases, status = await scrape_website_cases()
     
@@ -597,6 +626,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     
@@ -609,6 +641,9 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
     processing = await update.message.reply_text("⏳ Writing and formatting Excel spreadsheet...")
     cases, status = await scrape_website_cases()
     
@@ -642,6 +677,15 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    if MAINTENANCE_MODE:
+        # Edit the existing message or send a clear alert text response
+        try:
+            await query.edit_message_text(get_maintenance_message(), parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=get_maintenance_message(), parse_mode="Markdown")
+        return
+
     data = query.data
 
     if data == "cancel_action":
