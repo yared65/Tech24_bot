@@ -164,47 +164,47 @@ async def scrape_website_cases():
                 
                 raw_string_dump = str(entry).lower()
                 if "adama" in raw_string_dump:
-                    case_id = str(entry.get('callentry_id', entry.get('id', 'N/A')))
+                    # 1. Case ID
+                    case_id = str(entry.get('callentry_id', 'N/A'))
                     
-                    bank = clean_extracted_value(entry.get('bank'), ['bankname', 'bank_name', 'name', 'title'])
-                    if not bank:
-                        bank = clean_extracted_value(entry, ['bankname', 'bank_name'])
-                    if not bank or bank.isdigit():
-                        bank = "Awash"
+                    # 2. Terminal
+                    terminal_data = entry.get('atmterminal') or {}
+                    terminal_no = terminal_data.get('atmterminal_no', 'N/A') if isinstance(terminal_data, dict) else 'N/A'
+                    terminal_name = terminal_data.get('atmterminal_name', 'N/A') if isinstance(terminal_data, dict) else 'N/A'
 
-                    branch = clean_extracted_value(entry.get('branch'), ['branchname', 'branch_name', 'name', 'title'])
-                    if not branch:
-                        branch = clean_extracted_value(entry, ['branchname', 'branch_name'])
-                    if not branch or branch.isdigit():
-                        branch = "Adama Branch"
+                    # 3. Bank
+                    bank_data = entry.get('bank') or {}
+                    bank = bank_data.get('bank_name', 'Awash') if isinstance(bank_data, dict) else 'Awash'
 
-                    terminal = clean_extracted_value(entry.get('terminal'), ['atmterminal_name', 'atmterminal_no', 'terminal', 'name'])
-                    if not terminal:
-                        terminal = clean_extracted_value(entry, ['atmterminal_name', 'atmterminal_no', 'terminal'])
-                    if not terminal or '{' in terminal:
-                        terminal = "ATM_1"
+                    # 4. Issue
+                    issue_data = entry.get('issuesubcategory') or {}
+                    issue = issue_data.get('issuesubcat_name', 'ATM Issue') if isinstance(issue_data, dict) else 'ATM Issue'
 
-                    raw_issue = entry.get('description') or entry.get('issue') or "ATM"
-                    issue = clean_extracted_value(raw_issue, ['issuecatname', 'issuesubcatname', 'issuesubcat_name', 'issuecat_name', 'name', 'title'])
-                    if not issue or '{' in issue:
-                        issue = "ATM Issue"
+                    # 5. Branch
+                    branch_data = entry.get('branch') or {}
+                    branch = branch_data.get('branch_name', 'Adama Branch') if isinstance(branch_data, dict) else 'Adama Branch'
 
-                    # Robust Technician Name Extraction Fix
-                    tech_data = entry.get('technician') or entry.get('Technician')
-                    technician = "Not Assigned"
-                    tech_phone = "N/A"
-                    if tech_data:
-                        if isinstance(tech_data, dict):
-                            technician = tech_data.get('assigned_eng', tech_data.get('name', tech_data.get('username', 'Not Assigned')))
-                            tech_phone = tech_data.get('phone', 'N/A')
-                        elif isinstance(tech_data, str) and '{' in tech_data:
-                            technician = clean_extracted_value(tech_data, ['assigned_eng', 'name', 'username'])
-                            tech_phone = clean_extracted_value(tech_data, ['phone'])
+                    # 6. District
+                    district_data = entry.get('district') or {}
+                    district = district_data.get('dist_name', 'Adama') if isinstance(district_data, dict) else 'Adama'
 
-                    comment = entry.get('comment') or entry.get('description') or "No comments."
-                    district = "Adama"
+                    # 7. Comment
+                    comment = entry.get('callentry_description') or "-"
+                    if not comment or comment.strip() == "":
+                        comment = "-"
+
+                    # 8. Technician
+                    technician = entry.get('assigned_eng', 'Not Assigned')
+                    if not technician:
+                        technician = "Not Assigned"
                     
-                    created_at = entry.get('created_at', entry.get('start_date', ''))
+                    # Technician Phone
+                    tech_phone = entry.get('assigned_phone', '-')
+                    if not tech_phone:
+                        tech_phone = "-"
+
+                    # 9. Report Time
+                    created_at = entry.get('created_at', 'N/A')
                     date_str = str(created_at)[:19].replace("T", " ") if created_at else "N/A"
                     
                     try:
@@ -218,24 +218,7 @@ async def scrape_website_cases():
                             except Exception:
                                 date_obj = datetime.now()
 
-                    status_raw = ""
-                    for k in ['callentry_status', 'callentry_progress', 'status', 'progress']:
-                        val = entry.get(k)
-                        if val:
-                            status_raw = str(val).lower()
-                            break
-                    
-                    if not status_raw:
-                        for parent_key in ['technician', 'description', 'Technician']:
-                            parent_val = entry.get(parent_key)
-                            if isinstance(parent_val, dict):
-                                for k in ['callentry_status', 'callentry_progress', 'status', 'progress']:
-                                    if k in parent_val:
-                                        status_raw = str(parent_val[k]).lower()
-                                        break
-                                if status_raw:
-                                    break
-
+                    status_raw = str(entry.get('callentry_status', '')).lower()
                     if status_raw in ["complete", "completed", "done", "1"]:
                         status_text = "Completed"
                     else:
@@ -246,8 +229,8 @@ async def scrape_website_cases():
                         'bank': bank,
                         'district': district,
                         'branch': branch,
-                        'terminal': terminal,
-                        'atm_name': terminal,
+                        'terminal': terminal_no,
+                        'atm_name': terminal_name,
                         'issue': issue,
                         'status': status_text,
                         'comment': comment,
@@ -296,7 +279,7 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC 10-MINUTE PENDING MONITOR
+# 5. AUTOMATIC PENDING MONITOR (WITH 10-MIN FRESH FILTER)
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
@@ -310,24 +293,30 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not pending_cases:
         return
 
+    # ባለፉት 12 ደቂቃዎች ውስጥ የተመዘገቡትን ብቻ ለመለየት የሰዓት ማጣሪያ (safety margin ጨምሮ)
+    now = datetime.now()
+    ten_minutes_ago = now - timedelta(minutes=12)
+
     new_pending_cases = []
     for c in pending_cases:
-        if c['case_id'] not in SENT_CASES_TRACKER:
+        # ቼክ፦ ከተፈጠረ ከ 12 ደቂቃ በታች መሆን አለበት እና ከዚህ በፊት ያልተላከ መሆን አለበት
+        if c['date_obj'] >= ten_minutes_ago and c['case_id'] not in SENT_CASES_TRACKER:
             new_pending_cases.append(c)
             SENT_CASES_TRACKER.add(c['case_id'])
 
     if not new_pending_cases:
         return
 
+    # Image 3082.jpg ዲዛይን ላይ ባለው መሠረት
     for case in new_pending_cases:
         notif_text = (
-            f"⚡ *ATM Incident Notification* ⚡\n\n"
-            f"📄 *ID:* {case['case_id']}\n"
-            f"🏦 *Bank:* {case['bank']}\n"
-            f"⚠️ *Issue:* {case['issue']}\n"
-            f"🏢 *Branch:* {case['branch']}\n"
-            f"📍 *District:* {case['district']}\n"
-            f"💬 *Comment:* {case['comment']}\n"
+            f"*ATM Incident Notification*\n\n"
+            f"📄 *ID:* {case['case_id']},\n"
+            f"🏦 *Bank:* {case['bank']},\n"
+            f"⚠️ *Issue:* {case['issue']},\n"
+            f"🏢 *Branch:* {case['branch']},\n"
+            f"📍 *District:* {case['district']},\n"
+            f"💬 *Comment:* {case['comment']},\n"
             f"🕒 *Reported at:* {case['date_raw']}"
         )
         
@@ -343,11 +332,12 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS
+# 6. DYNAMIC UI BUILDERS (PENDING DESIGN)
 # ==========================================
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case['date_obj'])
     
+    # Image 3100.jpg ዲዛይን ላይ ባለው መሠረት
     text = (
         f"Case ID: {case['case_id']}\n"
         f"Terminal: {case['terminal']}\n"
@@ -365,72 +355,113 @@ def build_case_detail_ui(case):
     )
     
     keyboard = [
-        [InlineKeyboardButton("Terminate", callback_data=f"askterm_{case['case_id']}")],
-        [InlineKeyboardButton("Refresh", callback_data=f"refresh_{case['case_id']}")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel_action")]
+        [InlineKeyboardButton("⛔ Terminate", callback_data=f"askterm_{case['case_id']}")],
+        [InlineKeyboardButton("🌀 Refresh", callback_data=f"refresh_{case['case_id']}")],
+        [InlineKeyboardButton("⛔ Cancel", callback_data="cancel_action")]
     ]
     return text, InlineKeyboardMarkup(keyboard)
 
 # ==========================================
-# 7. EXCEL & REPORT ENGINE GENERATORS
+# 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
-def format_summary_report(cases, days_limit=7, title="Weekly"):
+def format_weekly_report_by_technician(cases):
+    """ሳምንታዊ ሪፖርት ከሰኞ-ቅዳሜ በቴክኒሻን ስም ከፋፍሎ የሚያወጣ"""
     now = datetime.now()
-    cutoff_date = now - timedelta(days=days_limit)
+    cutoff_date = now - timedelta(days=7)
     filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
 
     if not filtered_cases:
-        return f"📭 No cases recorded on dashboard for this {title} timeframe."
+        return "📭 No cases recorded on dashboard for this weekly timeframe."
 
-    report_lines = [f"📋 *Adama District Latest Cases Report ({title})* 📋\n"]
+    report_lines = []
 
-    for idx, case in enumerate(filtered_cases, start=1):
-        try:
-            date_formatted = case['date_obj'].strftime("%d/%m/%Y")
-        except Exception:
-            date_formatted = case['date_raw']
-            
-        case_string = (
-            f"{idx}. ID: {case['case_id']}\n"
-            f"🏦 Bank: {case['bank']} ({case['branch']})\n"
-            f"⚠️ Issue: {case['issue']}\n"
-            f"📅 Date: {date_formatted}\n"
-            f"📌 Status: {'✅' if case['status'] == 'Completed' else '⏳'} {case['status']}\n"
-            f"----------------------------------------"
-        )
-        report_lines.append(case_string)
-
-    report_lines.append("\n*Technician Performance Matrix*")
-    tech_analytics = {}
+    tech_groups = {}
     for case in filtered_cases:
-        tech_name = case['technician']
-        if not tech_name or tech_name == "Not Assigned":
-            continue
-        if tech_name not in tech_analytics:
-            tech_analytics[tech_name] = 0
-        if case['status'] == "Completed":
-            tech_analytics[tech_name] += 1
+        tech = case['technician']
+        if tech not in tech_groups:
+            tech_groups[tech] = []
+        tech_groups[tech].append(case)
 
-    if tech_analytics:
-        for technician, count in tech_analytics.items():
-            report_lines.append(f"👤 Technician *{technician}* {count} case{'s' if count != 1 else ''} resolved")
-    else:
-        report_lines.append("No cases resolved by assigned technicians yet.")
+    for tech, t_cases in tech_groups.items():
+        report_lines.append(f"📋 *Weekly report {tech}*\n")
+        for c in t_cases:
+            try:
+                date_formatted = c['date_obj'].strftime("%d/%m/%Y")
+            except Exception:
+                date_formatted = c['date_raw'][:10]
+            
+            status_lbl = c['status'].lower()
+            line = f"{date_formatted} {c['branch']} branch {c['bank']} bank ({c['issue']}) {status_lbl}."
+            report_lines.append(line)
+        report_lines.append("")
 
-    report_lines.append("\n*General Bank Analytics*")
+    report_lines.append("        *Generally*")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
         if b_name not in bank_analytics:
-            bank_analytics[b_name] = {"registered": 0, "completed": 0}
+            bank_analytics[b_name] = {"completed": 0, "ongoing": 0}
         
-        bank_analytics[b_name]["registered"] += 1
         if case['status'] == "Completed":
             bank_analytics[b_name]["completed"] += 1
+        else:
+            bank_analytics[b_name]["ongoing"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        summary_line = f"🏛 *{bank_name}* Registered: {stats['registered']}  |  Completed: {stats['completed']}"
-        report_lines.append(summary_line)
+        report_lines.append(f"*{bank_name}*")
+        report_lines.append(f"    Completed-{stats['completed']}")
+        report_lines.append(f"    On going-{stats['ongoing']}")
+
+    return "\n".join(report_lines)
+
+def format_monthly_report_matrix(cases):
+    """ወርሃዊ አፈጻጸም ማትሪክስ ከአማካኝና ፐርሰንት ስሌት ጋር"""
+    now = datetime.now()
+    cutoff_date = now - timedelta(days=30)
+    filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
+
+    if not filtered_cases:
+        return "📭 No cases recorded on dashboard for this monthly timeframe."
+
+    report_lines = ["📋 *Monthly report of matrix* 📋\n"]
+
+    tech_stats = {}
+    total_completed = 0
+    total_ongoing = 0
+
+    for case in filtered_cases:
+        tech = case['technician']
+        if tech == "Not Assigned":
+            continue
+        if tech not in tech_stats:
+            tech_stats[tech] = {"completed": 0, "ongoing": 0}
+        
+        if case['status'] == "Completed":
+            tech_stats[tech]["completed"] += 1
+            total_completed += 1
+        else:
+            tech_stats[tech]["ongoing"] += 1
+            total_ongoing += 1
+
+    for tech, stats in tech_stats.items():
+        report_lines.append(f"Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.")
+
+    report_lines.append("")
+    total_cases = total_completed + total_ongoing
+    report_lines.append(f"Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
+
+    if total_cases > 0:
+        completion_pct = (total_completed / total_cases) * 100
+        report_lines.append(f"🎯 Completion Rate: *{completion_pct:.1f}%*")
+    else:
+        report_lines.append("🎯 Completion Rate: *0%*")
+
+    num_techs = len(tech_stats)
+    if num_techs > 0:
+        avg_completed = total_completed / num_techs
+        report_lines.append(f"📊 Average Completed cases per Tech: *{avg_completed:.1f}*")
+    else:
+        report_lines.append("📊 Average Completed cases per Tech: *0*")
 
     return "\n".join(report_lines)
 
@@ -541,7 +572,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    report_text = format_summary_report(cases, days_limit=7, title="Weekly")
+    report_text = format_weekly_report_by_technician(cases)
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,7 +584,7 @@ async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    report_text = format_summary_report(cases, days_limit=30, title="Monthly")
+    report_text = format_monthly_report_matrix(cases)
     await update.message.reply_text(report_text, parse_mode="Markdown")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -590,7 +621,7 @@ async def structure_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
     login_url = 'https://api.tech24et.com/api/login'
-    api_url = 'https://api.tech24et.com/api/callentries?limit=1' # ለአወቃቀሩ አንድ ናሙና በቂ ነው
+    api_url = 'https://api.tech24et.com/api/callentries?limit=1'
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -760,6 +791,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
     job_queue = application.job_queue
+    # በየ 10 ደቂቃው (600 ሰከንድ) አውቶማቲክ ሞኒተሪንጉን ያስነሳል
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
 
     application.run_polling()
