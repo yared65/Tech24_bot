@@ -100,20 +100,20 @@ def get_relative_time(date_obj):
     seconds = diff.total_seconds()
     
     if seconds < 0:
-        return "just now", "now"
+        return "0min", "0min"
         
     minutes = int(seconds // 60)
     hours = int(minutes // 60)
     days = int(hours // 24)
     
     if days > 0:
-        return f"about {days} day{'s' if days > 1 else ''} ago", f"{days}d"
+        time_str = f"{days}d"
     elif hours > 0:
-        return f"about {hours} hour{'s' if hours > 1 else ''} ago", f"{hours}h"
-    elif minutes > 0:
-        return f"about {minutes} minute{'s' if minutes > 1 else ''} ago", f"{minutes}m"
+        time_str = f"{hours}h"
     else:
-        return "just now", "now"
+        time_str = f"{minutes}min"
+        
+    return time_str, time_str
 
 # ==========================================
 # 4. API SCRAPER & TRANSACTION ENGINES
@@ -164,46 +164,43 @@ async def scrape_website_cases():
                 
                 raw_string_dump = str(entry).lower()
                 if "adama" in raw_string_dump:
-                    # 1. Case ID
                     case_id = str(entry.get('callentry_id', 'N/A'))
                     
-                    # 2. Terminal
                     terminal_data = entry.get('atmterminal') or {}
-                    terminal_no = terminal_data.get('atmterminal_no', 'N/A') if isinstance(terminal_data, dict) else 'N/A'
-                    terminal_name = terminal_data.get('atmterminal_name', 'N/A') if isinstance(terminal_data, dict) else 'N/A'
+                    terminal_no = clean_extracted_value(terminal_data, ['atmterminal_no', 'terminal_no']) if isinstance(terminal_data, dict) else 'N/A'
+                    if not terminal_no or terminal_no == "None": terminal_no = "N/A"
+                    
+                    terminal_name = clean_extracted_value(terminal_data, ['atmterminal_name', 'terminal_name']) if isinstance(terminal_data, dict) else 'N/A'
+                    if not terminal_name or terminal_name == "None": terminal_name = "N/A"
 
-                    # 3. Bank
                     bank_data = entry.get('bank') or {}
-                    bank = bank_data.get('bank_name', 'Awash') if isinstance(bank_data, dict) else 'Awash'
+                    bank = clean_extracted_value(bank_data, ['bank_name', 'bankname']) if isinstance(bank_data, dict) else 'Awash'
+                    if not bank or bank == "None": bank = "Awash"
 
-                    # 4. Issue
-                    issue_data = entry.get('issuesubcategory') or {}
-                    issue = issue_data.get('issuesubcat_name', 'ATM Issue') if isinstance(issue_data, dict) else 'ATM Issue'
+                    issue_data = entry.get('issuesubcategory') or entry.get('issuecategory') or {}
+                    issue = clean_extracted_value(issue_data, ['issuesubcat_name', 'issuecatname', 'name']) if isinstance(issue_data, dict) else 'ATM Issue'
+                    if not issue or issue == "None": issue = "ATM Issue"
 
-                    # 5. Branch
                     branch_data = entry.get('branch') or {}
-                    branch = branch_data.get('branch_name', 'Adama Branch') if isinstance(branch_data, dict) else 'Adama Branch'
+                    branch = clean_extracted_value(branch_data, ['branch_name', 'branchname']) if isinstance(branch_data, dict) else 'Adama Branch'
+                    if not branch or branch == "None": branch = "Adama Branch"
 
-                    # 6. District
                     district_data = entry.get('district') or {}
-                    district = district_data.get('dist_name', 'Adama') if isinstance(district_data, dict) else 'Adama'
+                    district = clean_extracted_value(district_data, ['dist_name', 'district_name']) if isinstance(district_data, dict) else 'Adama'
+                    if not district or district == "None": district = "Adama"
 
-                    # 7. Comment
                     comment = entry.get('callentry_description') or "-"
                     if not comment or comment.strip() == "":
                         comment = "-"
 
-                    # 8. Technician
                     technician = entry.get('assigned_eng', 'Not Assigned')
-                    if not technician:
+                    if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
                         technician = "Not Assigned"
                     
-                    # Technician Phone
                     tech_phone = entry.get('assigned_phone', '-')
                     if not tech_phone:
                         tech_phone = "-"
 
-                    # 9. Report Time
                     created_at = entry.get('created_at', 'N/A')
                     date_str = str(created_at)[:19].replace("T", " ") if created_at else "N/A"
                     
@@ -279,7 +276,7 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC PENDING MONITOR (WITH 10-MIN FRESH FILTER)
+# 5. AUTOMATIC PENDING MONITOR (ALARM SENDS FOR ALL NEW ONGOING)
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if not NOTIFICATION_CHAT_ID:
@@ -290,34 +287,26 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         return
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
-    if not pending_cases:
-        return
-
-    # ባለፉት 12 ደቂቃዎች ውስጥ የተመዘገቡትን ብቻ ለመለየት የሰዓት ማጣሪያ (safety margin ጨምሮ)
-    now = datetime.now()
-    ten_minutes_ago = now - timedelta(minutes=12)
-
+    
     new_pending_cases = []
     for c in pending_cases:
-        # ቼክ፦ ከተፈጠረ ከ 12 ደቂቃ በታች መሆን አለበት እና ከዚህ በፊት ያልተላከ መሆን አለበት
-        if c['date_obj'] >= ten_minutes_ago and c['case_id'] not in SENT_CASES_TRACKER:
+        if c['case_id'] not in SENT_CASES_TRACKER:
             new_pending_cases.append(c)
             SENT_CASES_TRACKER.add(c['case_id'])
 
     if not new_pending_cases:
         return
 
-    # Image 3082.jpg ዲዛይን ላይ ባለው መሠረት
     for case in new_pending_cases:
         notif_text = (
-            f"*ATM Incident Notification*\n\n"
-            f"📄 *ID:* {case['case_id']},\n"
-            f"🏦 *Bank:* {case['bank']},\n"
-            f"⚠️ *Issue:* {case['issue']},\n"
-            f"🏢 *Branch:* {case['branch']},\n"
-            f"📍 *District:* {case['district']},\n"
-            f"💬 *Comment:* {case['comment']},\n"
-            f"🕒 *Reported at:* {case['date_raw']}"
+            f"📋 *Adama District Incident Notification* 📋\n\n"
+            f"1. ID: {case['case_id']}\n"
+            f"🏦 Bank: {case['bank']} ({case['branch']})\n"
+            f"⚠️ Issue: {case['issue']}\n"
+            f"📅 Date: {case['date_raw'][:10]}\n"
+            f"📌 Status: ⏳ On going\n"
+            f"💬 Comment: {case['comment']}\n"
+            f"--------------------------------"
         )
         
         kb = InlineKeyboardMarkup([
@@ -332,12 +321,9 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# 6. DYNAMIC UI BUILDERS (PENDING DESIGN)
+# 6. DYNAMIC UI BUILDERS
 # ==========================================
 def build_case_detail_ui(case):
-    relative_long, _ = get_relative_time(case['date_obj'])
-    
-    # Image 3100.jpg ዲዛይን ላይ ባለው መሠረት
     text = (
         f"Case ID: {case['case_id']}\n"
         f"Terminal: {case['terminal']}\n"
@@ -346,12 +332,9 @@ def build_case_detail_ui(case):
         f"Issue: {case['issue']}\n"
         f"Status: {case['status']}\n"
         f"District: {case['district']}\n"
-        f"ATM Name: {case['atm_name']}\n"
         f"Comment: {case['comment']}\n"
         f"Technician: {case['technician']}\n"
-        f"Technician Phone: {case['tech_phone']}\n"
-        f"Reported At: {case['date_raw']} (East Africa Time)\n"
-        f"Relative Time: {relative_long}"
+        f"Reported At: {case['date_raw']} (East Africa Time)"
     )
     
     keyboard = [
@@ -364,58 +347,44 @@ def build_case_detail_ui(case):
 # ==========================================
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
-def format_weekly_report_by_technician(cases):
-    """ሳምንታዊ ሪፖርት ከሰኞ-ቅዳሜ በቴክኒሻን ስም ከፋፍሎ የሚያወጣ"""
+def format_technician_weekly_report(cases, selected_tech):
+    """Generates a clear report for a specific technician structured according to the user image layout"""
     now = datetime.now()
-    cutoff_date = now - timedelta(days=7)
-    filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
+    start_of_week = now - timedelta(days=now.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
+
+    filtered_cases = [
+        c for c in cases 
+        if start_of_week <= c['date_obj'] <= end_of_week and c['technician'].lower() == selected_tech.lower()
+    ]
 
     if not filtered_cases:
-        return "📭 No cases recorded on dashboard for this weekly timeframe."
+        return f"📭 No cases recorded on dashboard for *{selected_tech}* from Monday to Saturday."
 
-    report_lines = []
+    report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
 
-    tech_groups = {}
-    for case in filtered_cases:
-        tech = case['technician']
-        if tech not in tech_groups:
-            tech_groups[tech] = []
-        tech_groups[tech].append(case)
-
-    for tech, t_cases in tech_groups.items():
-        report_lines.append(f"📋 *Weekly report {tech}*\n")
-        for c in t_cases:
-            try:
-                date_formatted = c['date_obj'].strftime("%d/%m/%Y")
-            except Exception:
-                date_formatted = c['date_raw'][:10]
+    for idx, c in enumerate(filtered_cases, start=1):
+        try:
+            date_formatted = c['date_obj'].strftime("%d/%m/%Y")
+        except Exception:
+            date_formatted = c['date_raw'][:10]
             
-            status_lbl = c['status'].lower()
-            line = f"{date_formatted} {c['branch']} branch {c['bank']} bank ({c['issue']}) {status_lbl}."
-            report_lines.append(line)
-        report_lines.append("")
-
-    report_lines.append("        *Generally*")
-    bank_analytics = {}
-    for case in filtered_cases:
-        b_name = case['bank']
-        if b_name not in bank_analytics:
-            bank_analytics[b_name] = {"completed": 0, "ongoing": 0}
+        status_emoji = "✅" if c['status'] == "Completed" else "⏳"
         
-        if case['status'] == "Completed":
-            bank_analytics[b_name]["completed"] += 1
-        else:
-            bank_analytics[b_name]["ongoing"] += 1
-
-    for bank_name, stats in bank_analytics.items():
-        report_lines.append(f"*{bank_name}*")
-        report_lines.append(f"    Completed-{stats['completed']}")
-        report_lines.append(f"    On going-{stats['ongoing']}")
+        line = (
+            f"{idx}. ID: {c['case_id']}\n"
+            f"🏦 Bank: {c['bank']} ({c['branch']} branch)\n"
+            f"⚠️ Issue: {c['issue']}\n"
+            f"📅 Date: {date_formatted}\n"
+            f"📌 Status: {status_emoji} {c['status']}\n"
+            f"--------------------------------"
+        )
+        report_lines.append(line)
 
     return "\n".join(report_lines)
 
 def format_monthly_report_matrix(cases):
-    """ወርሃዊ አፈጻጸም ማትሪክስ ከአማካኝና ፐርሰንት ስሌት ጋር"""
     now = datetime.now()
     cutoff_date = now - timedelta(days=30)
     filtered_cases = [c for c in cases if c['date_obj'] >= cutoff_date]
@@ -527,8 +496,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /pending - View currently open / unresolved cases\n"
         "• /report - View weekly performance metrics\n"
         "• /monthly - View monthly performance metrics\n"
-        "• /export - Download structured incident Excel spreadsheets\n"
-        "• /structure - View current dashboard API JSON tree map"
+        "• /export - Download structured incident Excel spreadsheets"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -564,7 +532,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
+    processing = await update.message.reply_text("⏳ Processing weekly active configurations, please wait...")
     cases, status = await scrape_website_cases()
     
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
@@ -572,8 +540,21 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    report_text = format_weekly_report_by_technician(cases)
-    await update.message.reply_text(report_text, parse_mode="Markdown")
+    # Dynamically extract all technicians assigned to any case in the parsed data scope
+    technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
+    
+    if not technicians:
+        return await update.message.reply_text("📭 No active technicians found in the loaded dashboard logs.")
+
+    text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
+    keyboard = []
+    
+    # Generate interactive selection menu for technicians
+    for tech in technicians:
+        keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
+        
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def monthly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
@@ -615,71 +596,6 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def structure_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ዳሽቦርድ API ላይ ያሉትን መዋቅሮች በሙሉ በምልክት አቀናብሮ የሚልክ አዲስ ኮማንድ"""
-    processing = await update.message.reply_text("⏳ ከዳሽቦርዱ ላይ የቅርብ ጊዜውን የዳታ መዋቅር እያመጣሁ ነው...")
-    
-    csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
-    login_url = 'https://api.tech24et.com/api/login'
-    api_url = 'https://api.tech24et.com/api/callentries?limit=1'
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
-    }
-
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
-        try:
-            await session.get(csrf_url)
-            xsrf_token = session.cookies.get("XSRF-TOKEN")
-            if xsrf_token:
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
-
-            payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
-            login_res = await session.post(login_url, json=payload)
-            
-            if login_res.status_code not in [200, 201, 204]:
-                await processing.edit_text("❌ ዳሽቦርዱ ላይ መግባት አልተቻለም (Login Failed)።")
-                return
-
-            response = await session.get(api_url)
-            data = response.json()
-            raw_list = data.get('data', []) if isinstance(data, dict) else data
-
-            if not raw_list or not isinstance(raw_list, list):
-                await processing.edit_text("❌ ከዳሽቦርዱ የመጣው የዳታ ሊስት ባዶ ነው ወይም አወቃቀሩ ተቀይሯል።")
-                return
-
-            sample_entry = raw_list[0]
-
-            def make_structure_tree(dictionary, indent=0):
-                tree_str = ""
-                for key, value in dictionary.items():
-                    if isinstance(value, dict):
-                        tree_str += "    " * indent + f"📁 *{key}*\n"
-                        tree_str += make_structure_tree(value, indent + 1)
-                    elif isinstance(value, list) and value and isinstance(value[0], dict):
-                        tree_str += "    " * indent + f"📁 *{key} []*\n"
-                        tree_str += make_structure_tree(value[0], indent + 1)
-                    else:
-                        tree_str += "    " * indent + f"├── 📄 `{key}`\n"
-                return tree_str
-
-            full_tree = make_structure_tree(sample_entry)
-            
-            final_message = (
-                "🌐 *Tech24 Real-time Dashboard Structure* 🌐\n\n"
-                f"{full_tree}"
-            )
-            
-            await processing.edit_text(final_message, parse_mode="Markdown")
-
-        except Exception as e:
-            await processing.edit_text(f"❌ ስህተት አጋጥሟል: {str(e)}")
-
 # ==========================================
 # 9. INLINE BUTTON CALLBACK HANDLER
 # ==========================================
@@ -690,6 +606,32 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data == "cancel_action":
         await query.message.delete()
+        return
+
+    if data.startswith("wrep_"):
+        tech_name = data.split("_")[1]
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ Error pulling logs: {status}")
+            
+        report_output = format_technician_weekly_report(cases, tech_name)
+        
+        # Add dynamic go-back options to toggle easily between technicians
+        back_kb = [[InlineKeyboardButton("🔙 Back to Technicians List", callback_data="back_to_techs")]]
+        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="Markdown")
+        return
+
+    if data == "back_to_techs":
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ Error: {status}")
+        technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
+        text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
+        keyboard = []
+        for tech in technicians:
+            keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("askterm_"):
@@ -764,8 +706,7 @@ async def post_init(application: Application) -> None:
         BotCommand("pending", "View open and unresolved cases"),
         BotCommand("report", "View weekly performance metrics"),
         BotCommand("monthly", "View monthly performance metrics"),
-        BotCommand("export", "Generate incident logs Excel sheet"),
-        BotCommand("structure", "View dashboard JSON directory tree")
+        BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
 
@@ -786,12 +727,10 @@ def main():
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("monthly", monthly_command))
     application.add_handler(CommandHandler("export", export_command))
-    application.add_handler(CommandHandler("structure", structure_command))
     
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
     job_queue = application.job_queue
-    # በየ 10 ደቂቃው (600 ሰከንድ) አውቶማቲክ ሞኒተሪንጉን ያስነሳል
     job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
 
     application.run_polling()
