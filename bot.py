@@ -201,19 +201,24 @@ async def scrape_website_cases():
                     if not tech_phone:
                         tech_phone = "-"
 
-                    created_at = entry.get('created_at', 'N/A')
-                    date_str = str(created_at)[:19].replace("T", " ") if created_at else "N/A"
+                    # Fixed Robust Parsing of Registration Date
+                    created_at = entry.get('created_at')
+                    date_obj = None
+                    date_str = "N/A"
                     
-                    try:
-                        date_obj = datetime.strptime(str(created_at)[:19], "%Y-%m-%dT%H:%M:%S")
-                    except Exception:
-                        try:
-                            date_obj = datetime.strptime(str(created_at)[:19], "%Y-%m-%d %H:%M:%S")
-                        except Exception:
+                    if created_at:
+                        clean_time_str = str(created_at).replace("T", " ").split(".")[0]
+                        date_str = clean_time_str[:19]
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
                             try:
-                                date_obj = datetime.strptime(str(created_at)[:10], "%Y-%m-%d")
-                            except Exception:
-                                date_obj = datetime.now()
+                                date_obj = datetime.strptime(date_str[:len(fmt)-2] if len(date_str) > len(fmt) else date_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+                                
+                    if not date_obj:
+                        date_obj = datetime.now()
+                        date_str = date_obj.strftime("%Y-%m-%d %H:%M:%S")
 
                     status_raw = str(entry.get('callentry_status', '')).lower()
                     if status_raw in ["complete", "completed", "done", "1"]:
@@ -303,7 +308,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
             f"1. ID: {case['case_id']}\n"
             f"🏦 Bank: {case['bank']} ({case['branch']})\n"
             f"⚠️ Issue: {case['issue']}\n"
-            f"📅 Date: {case['date_raw'][:10]}\n"
+            f"📅 Date: {case['date_obj'].strftime('%d/%m/%Y')}\n"
             f"📌 Status: ⏳ On going\n"
             f"💬 Comment: {case['comment']}\n"
             f"--------------------------------"
@@ -348,7 +353,7 @@ def build_case_detail_ui(case):
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
 def format_technician_weekly_report(cases, selected_tech):
-    """Generates a clear report for a specific technician structured according to the user image layout"""
+    """Generates a clear report for a specific technician with the registered registration dates"""
     now = datetime.now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -362,7 +367,8 @@ def format_technician_weekly_report(cases, selected_tech):
     if not filtered_cases:
         return f"📭 No cases recorded on dashboard for *{selected_tech}* from Monday to Saturday."
 
-    report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
+    report_lines = f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n\n"
+    actual_lines = []
 
     for idx, c in enumerate(filtered_cases, start=1):
         try:
@@ -380,9 +386,10 @@ def format_technician_weekly_report(cases, selected_tech):
             f"📌 Status: {status_emoji} {c['status']}\n"
             f"--------------------------------"
         )
-        report_lines.append(line)
+        actual_lines.append(line)
 
-    return "\n".join(report_lines)
+    report_lines += "\n".join(actual_lines)
+    return report_lines
 
 def format_monthly_report_matrix(cases):
     now = datetime.now()
@@ -540,7 +547,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    # Dynamically extract all technicians assigned to any case in the parsed data scope
     technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
     
     if not technicians:
@@ -549,7 +555,6 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
     keyboard = []
     
-    # Generate interactive selection menu for technicians
     for tech in technicians:
         keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
         
@@ -616,7 +621,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             
         report_output = format_technician_weekly_report(cases, tech_name)
         
-        # Add dynamic go-back options to toggle easily between technicians
         back_kb = [[InlineKeyboardButton("🔙 Back to Technicians List", callback_data="back_to_techs")]]
         await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="Markdown")
         return
@@ -698,7 +702,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. STARTUP MENU INITIALIZER
+# 10. STARTUP MENU INITIALIZER (STRUCTURE REMOVED)
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
