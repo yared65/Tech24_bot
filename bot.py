@@ -455,7 +455,7 @@ def format_weekly_summary_matrix(cases):
             total_ongoing += 1
 
     for tech, stats in tech_stats.items():
-        report_lines.append(f"👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.")
+        report_lines.append(f"👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
 
     report_lines.append("")
     total_cases = total_completed + total_ongoing
