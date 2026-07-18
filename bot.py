@@ -28,6 +28,9 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
+# List of allowed technicians for the report
+AUTHORIZED_TECHNICIANS = ["yared girma", "girmaye kelil", "yohanis getiye", "feab warku"]
+
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False
 
@@ -336,7 +339,6 @@ async def start_independent_alarm_loop(bot):
                 case_id = case['case_id']
                 case_time = case['date_obj']
 
-                # ⚡ 1. አዲስ ኬስ ሲመዘገብ (ወዲያውኑ አላርም ይልካል)
                 if case_id not in SENT_CASES_TRACKER:
                     SENT_CASES_TRACKER.add(case_id)
                     
@@ -370,7 +372,6 @@ async def start_independent_alarm_loop(bot):
                         except Exception: pass
                     continue
 
-                # ⏳ 2. የቆየ ኬስ (5 ሰዓት ሲሞላው በየ 5 ሰዓቱ ድጋሚ አላርም ያደርጋል)
                 time_elapsed = now - case_time
                 if time_elapsed >= timedelta(hours=5):
                     last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -518,6 +519,11 @@ def format_weekly_summary_matrix(cases):
         tech = case['technician']
         if tech == "Not Assigned":
             continue
+        # Filter for the summary matrix as well
+        tech_lower = tech.lower()
+        if not any(auth in tech_lower for auth in AUTHORIZED_TECHNICIANS):
+            continue
+
         if tech not in tech_stats:
             tech_stats[tech] = {"completed": 0, "ongoing": 0}
         
@@ -622,8 +628,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
-    # ⚡ [INSTANT REALTIME TRIGER] 
-    # ሰውየው /start ሲል ምንም ሳይጠብቅ አሁኑኑ ዳሽቦርዱ ላይ ያሉትን ኬሶች በሙሉ በቀጥታ ይልክለታል!
     try:
         cases, status = await scrape_website_cases()
         if status == "OK":
@@ -702,9 +706,20 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status != "OK":
         return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
 
-    technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
+    # Filtered Tech List Logic
+    found_techs = []
+    # Get all unique techs from the database
+    raw_techs = list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"]))
+    
+    for t in raw_techs:
+        # Check if the tech name in the DB exists in our authorized list
+        if any(auth in t.lower() for auth in AUTHORIZED_TECHNICIANS):
+            found_techs.append(t)
+
+    technicians = sorted(found_techs)
+
     if not technicians:
-        return await update.message.reply_text("📭 No active technicians found in the loaded dashboard logs.")
+        return await update.message.reply_text("📭 No active technicians from your permitted list found in the loaded dashboard logs.")
 
     text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
     keyboard = []
@@ -787,7 +802,15 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         cases, status = await scrape_website_cases()
         if status != "OK":
             return await query.edit_message_text(f"❌ Error: {status}")
-        technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
+        # Re-apply filtering for the back button
+        found_techs = []
+        raw_techs = list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"]))
+        for t in raw_techs:
+            if any(auth in t.lower() for auth in AUTHORIZED_TECHNICIANS):
+                found_techs.append(t)
+        
+        technicians = sorted(found_techs)
+        
         text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
         keyboard = []
         for tech in technicians:
