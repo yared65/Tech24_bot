@@ -33,13 +33,11 @@ MAINTENANCE_MODE = False
 
 # 🎯 በዳሽቦርዱ ላይ ያሉህ ትክክለኛ የቴክኒሻኖች ስም ዝርዝር
 ALLOWED_TECHNICIANS = [
-    "Abel Demeke",
     "Feab Worku",
     "Girmaye Kelil",
     "Yared Girma",
-    "Yeshurun Asefa",
     "Yohanis Getiye",
-    "Yonael Daniel"
+    
 ]
 
 def get_eat_now():
