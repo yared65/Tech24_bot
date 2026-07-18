@@ -32,15 +32,14 @@ PASSWORD = os.environ.get("PASSWORD")
 MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS
-# በዳሽቦርዱ ሊስት (Drop-down) ላይ እንዴት እንደሚመጡ ልክ በዚያው አጻጻፍ እዚህ ያስገቡ
+# 💡 አዲስ ቴክኒሻን እዚህ ዝርዝር ውስጥ ይጨምሩ። በትልቁም በትናንሹም ቢጻፍ ችግር የለውም፤ ኮዱ ያስተካክለዋል።
 ALLOWED_TECHNICIANS = [
-    "Abel Demeke",
-    "Feab Worku",
+   
     "Girmaye Kelil",
     "Yared Girma",
-    "Yeshurun Asefa",
     "Yohanis Getiye",
-    "Yonael Daniel"
+   
+    # "እዚህ ጋ አዲሱን ሰው ስም በኮቴሽን ውስጥ ያስገቡ",
 ]
 
 def get_eat_now():
@@ -132,20 +131,23 @@ def get_relative_time(date_obj):
     return time_str, time_str
 
 # ==========================================
-# Helper: Strict Exact Matcher (Drop-down Safe)
+# Helper: Case-Insensitive Smart Exact Matcher
 # ==========================================
 def find_matching_technician(dashboard_tech_name):
     """
-    ዳሽቦርዱ ላይ ያለው ስም ሁልጊዜ ወጥ በሆነ ሊስት ስለሚመጣ፣ 
-    ፊደል በፊደል በትክክል (Exact Match) የሚገጥመውን ብቻ ይፈልጋል።
+    የፊደል ትልቅና ትንሽ መሆን (Case Sensitivity) እና ባዶ ቦታዎችን (Spaces) 
+    ማስተካከል ባለመቻሉ የሚፈጠርን ስህተት የሚቀርፍ ማመሳሰያ።
     """
     if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-"]:
         return None
         
-    dash_clean = str(dashboard_tech_name).strip().lower()
+    # ዳሽቦርዱ ላይ የመጣውን ስም ማጽዳት
+    dash_clean = " ".join(str(dashboard_tech_name).strip().split()).lower()
     
     for tech in ALLOWED_TECHNICIANS:
-        if tech.lower() == dash_clean:
+        # በሊስቱ ላይ ያለውን ስም ማጽዳት
+        tech_clean = " ".join(str(tech).strip().split()).lower()
+        if tech_clean == dash_clean:
             return tech
             
     return None
