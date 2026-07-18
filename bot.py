@@ -31,6 +31,17 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False
 
+# 🎯 በዳሽቦርዱ ላይ ያሉህ ትክክለኛ የቴክኒሻኖች ስም ዝርዝር
+ALLOWED_TECHNICIANS = [
+    "Abel Demeke",
+    "Feab Worku",
+    "Girmaye Kelil",
+    "Yared Girma",
+    "Yeshurun Asefa",
+    "Yohanis Getiye",
+    "Yonael Daniel"
+]
+
 def get_eat_now():
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
@@ -336,7 +347,6 @@ async def start_independent_alarm_loop(bot):
                 case_id = case['case_id']
                 case_time = case['date_obj']
 
-                # ⚡ 1. አዲስ ኬስ ሲመዘገብ (ወዲያውኑ አላርም ይልካል)
                 if case_id not in SENT_CASES_TRACKER:
                     SENT_CASES_TRACKER.add(case_id)
                     
@@ -370,7 +380,6 @@ async def start_independent_alarm_loop(bot):
                         except Exception: pass
                     continue
 
-                # ⏳ 2. የቆየ ኬስ (5 ሰዓት ሲሞላው በየ 5 ሰዓቱ ድጋሚ አላርም ያደርጋል)
                 time_elapsed = now - case_time
                 if time_elapsed >= timedelta(hours=5):
                     last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -456,11 +465,17 @@ def format_technician_weekly_report(cases, selected_tech):
 
     filtered_cases = [
         c for c in cases 
-        if start_of_week <= c['date_obj'] <= end_of_week and c['technician'].lower() == selected_tech.lower()
+        if start_of_week <= c['date_obj'] <= end_of_week and str(c['technician']).strip().lower() == selected_tech.strip().lower()
     ]
 
     if not filtered_cases:
-        return f"📭 No cases recorded on dashboard for *{selected_tech}* from Monday to Saturday this week."
+        return (
+            f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📭 *Currently, there are no recorded cases assigned to this technician for this week.*\n\n"
+            f"🌟 Keep up the great work!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
 
     report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
 
@@ -505,30 +520,34 @@ def format_weekly_summary_matrix(cases):
 
     filtered_cases = [c for c in cases if start_of_week <= c['date_obj'] <= end_of_week]
 
-    if not filtered_cases:
-        return "📭 No cases recorded on dashboard for this current week timeframe."
-
     report_lines = ["📋 *Weekly Summary Report of Matrix* 📋\n"]
 
-    tech_stats = {}
+    # 🎯 ቋሚ ማሻሻያ፦ ሁሉም ቴክኒሻኖች አስቀድመው 0 ተብለው ይያዛሉ
+    tech_stats = {tech: {"completed": 0, "ongoing": 0} for tech in ALLOWED_TECHNICIANS}
     total_completed = 0
     total_ongoing = 0
 
     for case in filtered_cases:
-        tech = case['technician']
-        if tech == "Not Assigned":
-            continue
-        if tech not in tech_stats:
-            tech_stats[tech] = {"completed": 0, "ongoing": 0}
+        case_tech_raw = str(case['technician']).strip().lower()
         
-        if case['status'] == "Completed":
-            tech_stats[tech]["completed"] += 1
-            total_completed += 1
-        else:
-            tech_stats[tech]["ongoing"] += 1
-            total_ongoing += 1
+        # 🤝 Case-Insensitive ማነጻጸሪያ (በዳሽቦርድ ላይ በትናንሽ ፊደል ቢጻፍ እንኳ በትክክል እንዲያገኘው)
+        matched_tech = None
+        for tech in ALLOWED_TECHNICIANS:
+            if tech.lower() == case_tech_raw:
+                matched_tech = tech
+                break
+        
+        if matched_tech:
+            if case['status'] == "Completed":
+                tech_stats[matched_tech]["completed"] += 1
+                total_completed += 1
+            else:
+                tech_stats[matched_tech]["ongoing"] += 1
+                total_ongoing += 1
 
-    for tech, stats in tech_stats.items():
+    # 🚀 ምንም ስራ የሌላቸው ቴክኒሻኖች "0 case completed 0 on going" ተብለው በትክክል እዚህ ይወጣሉ!
+    for tech in ALLOWED_TECHNICIANS:
+        stats = tech_stats[tech]
         report_lines.append(f" 👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
 
     report_lines.append("")
@@ -541,7 +560,7 @@ def format_weekly_summary_matrix(cases):
     else:
         report_lines.append("🎯 Completion Rate: *0%*")
 
-    num_techs = len(tech_stats)
+    num_techs = len(ALLOWED_TECHNICIANS)
     if num_techs > 0:
         avg_completed = total_completed / num_techs
         report_lines.append(f"📊 Average Completed cases per Tech: *{avg_completed:.1f}*")
@@ -622,8 +641,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
-    # ⚡ [INSTANT REALTIME TRIGER] 
-    # ሰውየው /start ሲል ምንም ሳይጠብቅ አሁኑኑ ዳሽቦርዱ ላይ ያሉትን ኬሶች በሙሉ በቀጥታ ይልክለታል!
     try:
         cases, status = await scrape_website_cases()
         if status == "OK":
@@ -694,21 +711,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE:
         return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
 
-    processing = await update.message.reply_text("⏳ Processing weekly active configurations, please wait...")
-    cases, status = await scrape_website_cases()
-    
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
-
-    if status != "OK":
-        return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
-
-    technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
-    if not technicians:
-        return await update.message.reply_text("📭 No active technicians found in the loaded dashboard logs.")
-
     text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
     keyboard = []
-    for tech in technicians:
+    for tech in sorted(ALLOWED_TECHNICIANS):
         keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -784,13 +789,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if data == "back_to_techs":
-        cases, status = await scrape_website_cases()
-        if status != "OK":
-            return await query.edit_message_text(f"❌ Error: {status}")
-        technicians = sorted(list(set([c['technician'] for c in cases if c['technician'] != "Not Assigned"])))
         text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
         keyboard = []
-        for tech in technicians:
+        for tech in sorted(ALLOWED_TECHNICIANS):
             keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
