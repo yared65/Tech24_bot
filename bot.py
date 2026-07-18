@@ -31,7 +31,6 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False
 
-# የሰዓት ዞን ንጽጽር ስህተት እንዳይፈጠር ወጥ የሆነ የኢትዮጵያ ሰዓት አወሳሰድ (Naive)
 def get_eat_now():
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
@@ -46,7 +45,7 @@ else:
 
 SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
-ACTIVE_USERS_TRACKER = set() # 👥 ቦቱን /start ያሉ ሰዎችን መከታተያ መጋዘን
+ACTIVE_USERS_TRACKER = set()
 
 # ==========================================
 # 2. FLASK SERVER FOR KEEPALIVE (RENDER)
@@ -337,7 +336,7 @@ async def start_independent_alarm_loop(bot):
                 case_id = case['case_id']
                 case_time = case['date_obj']
 
-                # ⚡ 1. አዲስ ክፍት ኬስ ሲመዘገብ (ወዲያውኑ አላርም ለማድረግ)
+                # ⚡ 1. አዲስ ኬስ ሲመዘገብ (ወዲያውኑ አላርም ይልካል)
                 if case_id not in SENT_CASES_TRACKER:
                     SENT_CASES_TRACKER.add(case_id)
                     
@@ -362,12 +361,10 @@ async def start_independent_alarm_loop(bot):
                     
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
                     
-                    # ወደ ግሩፕ መላኪያ
                     if NOTIFICATION_CHAT_ID:
                         try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
                         except Exception: pass
 
-                    # ወደ ሁሉም የግል ቻት ተጠቃሚዎች መላኪያ
                     for user_id in list(ACTIVE_USERS_TRACKER):
                         try: await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
                         except Exception: pass
@@ -625,38 +622,39 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
-    # ⚡ [INSTANT START TRIGGER]: ሰውየው /start ሲል ሳይቆይ አሁን ዳሽቦርዱ ላይ ያሉትን ክፍት ኬሶች በሙሉ ወዲያው ይልክለታል!
-    cases, status = await scrape_website_cases()
-    if status == "OK":
-        pending_statuses = ["on going", "pending", "open", "0"]
-        pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
-        
-        now = get_eat_now()
-        for case in pending_cases:
-            time_diff = now - case['date_obj']
-            hours_ago = int(time_diff.total_seconds() // 3600)
-            mins_ago = int((time_diff.total_seconds() % 3600) // 60)
-            age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
-
-            notif_text = (
-                f"🚨 *ATM Incident Alert (Active)* 🚨\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📄 *ID:* `{case['case_id']}`\n"
-                f"🏦 *Bank:* {case['bank']}\n"
-                f"🏢 *Branch:* {case['branch']}\n"
-                f"⚠️ *Issue:* {case['issue']}\n"
-                f"📍 *District:* {case['district']}\n"
-                f"💬 *Comment:* {case['comment']}\n"
-                f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📌 _Status: Pending Action / Unresolved_"
-            )
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
-            try: await context.bot.send_message(chat_id=chat_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-            except Exception: pass
+    # ⚡ [INSTANT REALTIME TRIGER] 
+    # ሰውየው /start ሲል ምንም ሳይጠብቅ አሁኑኑ ዳሽቦርዱ ላይ ያሉትን ኬሶች በሙሉ በቀጥታ ይልክለታል!
+    try:
+        cases, status = await scrape_website_cases()
+        if status == "OK":
+            pending_statuses = ["on going", "pending", "open", "0"]
+            pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
             
-            # ይህ ኬስ ቀድሞውኑ ስለተላከለት በጀርባ አላርሙ ድጋሚ እንዳይላክ ትራከሩ ላይ ይመዘገባል
-            SENT_CASES_TRACKER.add(case['case_id'])
+            now = get_eat_now()
+            for case in pending_cases:
+                time_diff = now - case['date_obj']
+                hours_ago = int(time_diff.total_seconds() // 3600)
+                mins_ago = int((time_diff.total_seconds() % 3600) // 60)
+                age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
+
+                notif_text = (
+                    f"🚨 *ATM Incident Alert (Active)* 🚨\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📄 *ID:* `{case['case_id']}`\n"
+                    f"🏦 *Bank:* {case['bank']}\n"
+                    f"🏢 *Branch:* {case['branch']}\n"
+                    f"⚠️ *Issue:* {case['issue']}\n"
+                    f"📍 *District:* {case['district']}\n"
+                    f"💬 *Comment:* {case['comment']}\n"
+                    f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 _Status: Pending Action / Unresolved_"
+                )
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
+                await context.bot.send_message(chat_id=chat_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                SENT_CASES_TRACKER.add(case['case_id'])
+    except Exception as e:
+        logger.error(f"Error in instant start trigger: {str(e)}")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE:
@@ -854,8 +852,6 @@ async def post_init(application: Application) -> None:
         BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
-    
-    # 🚀 የባክግራውንድ አላርሙን በቴሌግራም አሲንክ ሉፕ ውስጥ በትክክል እዚህ ላይ እናስጀምረዋለን!
     asyncio.create_task(start_independent_alarm_loop(application.bot))
 
 # ==========================================
