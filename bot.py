@@ -31,7 +31,9 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False
 
+# የሰዓት ዞን ንጽጽር ስህተት (TypeError) እንዳይፈጠር ወጥ የሆነ የኢትዮጵያ ሰዓት አወሳሰድ
 def get_eat_now():
+    # ሰዓቱን ያለ Timezone Object (Naive) አድርጎ መመለስ
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
@@ -233,7 +235,8 @@ async def scrape_website_cases():
                         clean_time_str = date_str.split(".")[0]
                         for fmt in formats_to_try:
                             try:
-                                date_obj = datetime.strptime(clean_time_str, fmt)
+                                # ሰዓቱን ያለ ሰዓት ዞን (Naive) አድርጎ መፍታት
+                                date_obj = datetime.strptime(clean_time_str, fmt).replace(tzinfo=None)
                                 break
                             except ValueError:
                                 continue
@@ -335,7 +338,7 @@ async def start_independent_alarm_loop(bot):
                 case_id = case['case_id']
                 case_time = case['date_obj']
 
-                # ⚡ 1. መጀመሪያ፡ ቦቱ ክፍት የነበሩትን ሁሉንም ኬሶች ለመጀመሪያ ጊዜ ሲያገኝ ወዲያውኑ አላርም ይልካል!
+                # ⚡ 1. መጀመሪያ፡ ቦቱ ሲነሳ ክፍት የነበሩትን ሁሉንም ኬሶች ለመጀመሪያ ጊዜ ሲያገኝ ወዲያውኑ አላርም ይልካል!
                 if case_id not in SENT_CASES_TRACKER:
                     SENT_CASES_TRACKER.add(case_id)
                     
@@ -814,7 +817,6 @@ def main():
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # post_init እዚህ ላይ ተገናኝቷል
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
