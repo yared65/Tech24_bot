@@ -33,7 +33,6 @@ MAINTENANCE_MODE = False
 
 # የኢትዮጵያን ሰዓት (East Africa Time) ለማግኘት የምንጠቀምበት ፈንክሽን
 def get_eat_now():
-    # በሰርቨር ላይ UTC ሰዓት ስለሚሆን 3 ሰዓት እንጨምርበታለን
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
@@ -45,7 +44,9 @@ if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
 else:
     NOTIFICATION_CHAT_ID = raw_chat_id
 
+# 🔄 አላርምና ማሳሰቢያዎችን ለመከታተል የሚጠቅሙ ትራከሮች
 SENT_CASES_TRACKER = set()
+SENT_REMINDERS_TRACKER = {}  # case_id: last_reminder_time
 
 # ==========================================
 # 2. FLASK SERVER FOR KEEPALIVE (RENDER)
@@ -103,7 +104,7 @@ def clean_extracted_value(data, key_hierarchy):
     return ""
 
 def get_relative_time(date_obj):
-    now = get_eat_now()  # የተስተካከለ የኢትዮጵያ ሰዓት
+    now = get_eat_now()
     diff = now - date_obj
     seconds = diff.total_seconds()
     
@@ -217,10 +218,8 @@ async def scrape_website_cases():
                     if not tech_phone:
                         tech_phone = "-"
 
-                    # 🕒 የሰዓት አወሳሰድ ማስተካከያ (Registered Time Extraction)
-                    # 11:57:00 የሚለውን በትክክል ለመፍታት ቀዳሚዎቹ ፎርማቶች ተስተካክለዋል
                     created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                    if not created_at:
+                    if not create_at:
                         tech_folder = entry.get('Technician') or entry.get('technician') or {}
                         if isinstance(tech_folder, dict):
                             created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
@@ -231,11 +230,11 @@ async def scrape_website_cases():
                     if created_at:
                         date_str = str(created_at).strip()
                         formats_to_try = (
-                            "%d/%m/%Y %H:%M:%S",    # 18/07/2026 11:57:00 (ያለ AM/PM ለሚመጣው 24-hr)
-                            "%d/%m/%Y %I:%M %p",    # 18/07/2026 11:57 AM
-                            "%d/%m/%Y %H:%M",       # 18/07/2026 11:57
-                            "%Y-%m-%d %H:%M:%S",    # 2026-07-18 11:57:00
-                            "%Y-%m-%dT%H:%M:%S",    # 2026-07-18T11:57:00
+                            "%d/%m/%Y %H:%M:%S",
+                            "%d/%m/%Y %I:%M %p",
+                            "%d/%m/%Y %H:%M",
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%dT%H:%M:%S",
                             "%d/%m/%Y",
                             "%Y-%m-%d"
                         )
@@ -320,7 +319,7 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC PENDING MONITOR (10-MIN FRESH)
+# 5. FAST AUTOMATIC MONITOR & OVERDUE REMINDER
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE:
@@ -330,57 +329,75 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Notification Chat ID is missing! Alarm skipped.")
         return
 
-    logger.info("Checking dashboard for new Adama cases (Last 10 minutes)...")
     cases, status = await scrape_website_cases()
     if status != "OK":
         logger.error(f"Dashboard scraper failed during alarm scan: {status}")
         return
 
-    pending_cases = [c for c in cases if c['status'] == "On going"]
+    pending_statuses = ["on going", "pending", "open", "0"]
+    pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
     
     now = get_eat_now()
-    ten_minutes_ago = now - timedelta(minutes=11) # የ10 ደቂቃ ገደብ ጥበቃ
 
-    new_pending_cases = []
-    for c in pending_cases:
-        # ባለፉት 10 ደቂቃ ውስጥ የተመዘገበ እና ከዚህ በፊት አላርም ያልተላከለት ኬስ
-        if c['date_obj'] >= ten_minutes_ago and c['case_id'] not in SENT_CASES_TRACKER:
-            new_pending_cases.append(c)
-            SENT_CASES_TRACKER.add(c['case_id'])
+    for case in pending_cases:
+        case_id = case['case_id']
+        case_time = case['date_obj']
 
-    if not new_pending_cases:
-        logger.info("No new cases registered in the last 10 minutes.")
-        return
-
-    for case in new_pending_cases:
-        notif_text = (
-            f"🚨 *New ATM Incident Notification* 🚨\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📄 *ID:* `{case['case_id']}`\n"
-            f"🏦 *Bank:* {case['bank']}\n"
-            f"🏢 *Branch:* {case['branch']}\n"
-            f"⚠️ *Issue:* {case['issue']}\n"
-            f"📍 *District:* {case['district']}\n"
-            f"💬 *Comment:* {case['comment']}\n"
-            f"🕒 *Reported at:* {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 _Status: Registered just now!_"
-        )
-        
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Open In tech24et.com dashboard", url="https://tech24et.com/")]
-        ])
-        
-        try:
-            await context.bot.send_message(
-                chat_id=NOTIFICATION_CHAT_ID,
-                text=notif_text,
-                reply_markup=kb,
-                parse_mode="Markdown"
+        # ⚡ 1. አዲስ የተመዘገበ ኬስ (ወዲያውኑ በቅጽበት አላርም ይልካል)
+        if case_id not in SENT_CASES_TRACKER:
+            SENT_CASES_TRACKER.add(case_id)
+            
+            notif_text = (
+                f"🚨 *New ATM Incident Notification* 🚨\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📄 *ID:* `{case_id}`\n"
+                f"🏦 *Bank:* {case['bank']}\n"
+                f"🏢 *Branch:* {case['branch']}\n"
+                f"⚠️ *Issue:* {case['issue']}\n"
+                f"📍 *District:* {case['district']}\n"
+                f"💬 *Comment:* {case['comment']}\n"
+                f"🕒 *Reported at:* {case['date_raw']}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 _Status: Pending Action / Unresolved_"
             )
-            logger.info(f"Alarm sent successfully for new case {case['case_id']}")
-        except Exception as e:
-            logger.error(f"Failed to send message for case {case['case_id']}: {str(e)}")
+            await send_alarm_message(context, notif_text)
+            continue
+
+        # ⏳ 2. የቆየ ኬስ (5 ሰዓት ሲሞላው በየ 5 ሰዓቱ አንዴ ብቻ ማሳሰቢያ ይልካል)
+        time_elapsed = now - case_time
+        if time_elapsed >= timedelta(hours=5):
+            last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
+            
+            if last_reminder is None or (now - last_reminder) >= timedelta(hours=5):
+                SENT_REMINDERS_TRACKER[case_id] = now
+                
+                hours_passed = int(time_elapsed.total_seconds() // 3600)
+                reminder_text = (
+                    f"⚠️ *OVERDUE INCIDENT REMINDER (>{hours_passed} Hours)* ⚠️\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"ይህ ኬስ ከተመዘገበ {hours_passed} ሰዓታት አልፈውታል። ፍተሻ ያድርጉ።\n\n"
+                    f"📄 *ID:* `{case_id}`\n"
+                    f"🏦 *Bank:* {case['bank']} ({case['branch']})\n"
+                    f"⚠️ *Issue:* {case['issue']}\n"
+                    f"👤 *Technician:* {case['technician']}\n"
+                    f"🕒 *Reported at:* {case['date_raw']}\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ _Duration: Still Pending!_"
+                )
+                await send_alarm_message(context, reminder_text)
+
+async def send_alarm_message(context, text):
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
+    try:
+        await context.bot.send_message(
+            chat_id=NOTIFICATION_CHAT_ID,
+            text=text,
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        logger.info("Alarm message dispatched successfully.")
+    except Exception as e:
+        logger.error(f"Failed to send alarm message: {str(e)}")
 
 # ==========================================
 # 5.5 GLOBAL MAINTENANCE RESPONSE GENERATOR
@@ -843,8 +860,9 @@ def main():
     
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
+    # ⏱️ የቦቱ የፍተሻ ጊዜ በየ 30 ሰከንዱ እንዲሆን ተስተካክሏል (ወዲያው አላርም እንዲልክ)
     job_queue = application.job_queue
-    job_queue.run_repeating(auto_monitor_dashboard, interval=600, first=10)
+    job_queue.run_repeating(auto_monitor_dashboard, interval=30, first=5)
 
     application.run_polling()
 
