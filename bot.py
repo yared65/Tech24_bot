@@ -29,7 +29,7 @@ EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
 # 🚨 MAINTENANCE SWITCH (Set to False to turn the bot back on normally)
-MAINTENANCE_MODE = true
+MAINTENANCE_MODE = True
 
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
 if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
