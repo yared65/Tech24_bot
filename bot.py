@@ -31,13 +31,16 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False
 
-# 🎯 በዳሽቦርዱ ላይ ያሉህ ትክክለኛ የቴክኒሻኖች ስም ዝርዝር
+# 🎯 ALLOWED TECHNICIANS
+# በዳሽቦርዱ ሊስት (Drop-down) ላይ እንዴት እንደሚመጡ ልክ በዚያው አጻጻፍ እዚህ ያስገቡ
 ALLOWED_TECHNICIANS = [
+    "Abel Demeke",
     "Feab Worku",
     "Girmaye Kelil",
     "Yared Girma",
+    "Yeshurun Asefa",
     "Yohanis Getiye",
-    
+    "Yonael Daniel"
 ]
 
 def get_eat_now():
@@ -127,6 +130,25 @@ def get_relative_time(date_obj):
     else:
         time_str = f"{minutes}min"
     return time_str, time_str
+
+# ==========================================
+# Helper: Strict Exact Matcher (Drop-down Safe)
+# ==========================================
+def find_matching_technician(dashboard_tech_name):
+    """
+    ዳሽቦርዱ ላይ ያለው ስም ሁልጊዜ ወጥ በሆነ ሊስት ስለሚመጣ፣ 
+    ፊደል በፊደል በትክክል (Exact Match) የሚገጥመውን ብቻ ይፈልጋል።
+    """
+    if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-"]:
+        return None
+        
+    dash_clean = str(dashboard_tech_name).strip().lower()
+    
+    for tech in ALLOWED_TECHNICIANS:
+        if tech.lower() == dash_clean:
+            return tech
+            
+    return None
 
 # ==========================================
 # 4. API SCRAPER & TRANSACTION ENGINES
@@ -459,12 +481,14 @@ def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
+    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
-    filtered_cases = [
-        c for c in cases 
-        if start_of_week <= c['date_obj'] <= end_of_week and str(c['technician']).strip().lower() == selected_tech.strip().lower()
-    ]
+    filtered_cases = []
+    for c in cases:
+        if start_of_week <= c['date_obj'] <= end_of_week:
+            matched_tech = find_matching_technician(c['technician'])
+            if matched_tech and matched_tech.lower() == selected_tech.lower():
+                filtered_cases.append(c)
 
     if not filtered_cases:
         return (
@@ -514,26 +538,19 @@ def format_weekly_summary_matrix(cases):
     now = get_eat_now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
+    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
     filtered_cases = [c for c in cases if start_of_week <= c['date_obj'] <= end_of_week]
 
     report_lines = ["📋 *Weekly Summary Report of Matrix* 📋\n"]
 
-    # 🎯 ቋሚ ማሻሻያ፦ ሁሉም ቴክኒሻኖች አስቀድመው 0 ተብለው ይያዛሉ
     tech_stats = {tech: {"completed": 0, "ongoing": 0} for tech in ALLOWED_TECHNICIANS}
     total_completed = 0
     total_ongoing = 0
+    other_district_or_unassigned = 0
 
     for case in filtered_cases:
-        case_tech_raw = str(case['technician']).strip().lower()
-        
-        # 🤝 Case-Insensitive ማነጻጸሪያ (በዳሽቦርድ ላይ በትናንሽ ፊደል ቢጻፍ እንኳ በትክክል እንዲያገኘው)
-        matched_tech = None
-        for tech in ALLOWED_TECHNICIANS:
-            if tech.lower() == case_tech_raw:
-                matched_tech = tech
-                break
+        matched_tech = find_matching_technician(case['technician'])
         
         if matched_tech:
             if case['status'] == "Completed":
@@ -542,8 +559,9 @@ def format_weekly_summary_matrix(cases):
             else:
                 tech_stats[matched_tech]["ongoing"] += 1
                 total_ongoing += 1
+        else:
+            other_district_or_unassigned += 1
 
-    # 🚀 ምንም ስራ የሌላቸው ቴክኒሻኖች "0 case completed 0 on going" ተብለው በትክክል እዚህ ይወጣሉ!
     for tech in ALLOWED_TECHNICIANS:
         stats = tech_stats[tech]
         report_lines.append(f" 👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
@@ -551,6 +569,9 @@ def format_weekly_summary_matrix(cases):
     report_lines.append("")
     total_cases = total_completed + total_ongoing
     report_lines.append(f" 🟧 Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
+    
+    if other_district_or_unassigned > 0:
+        report_lines.append(f" 🔍 Unassigned / Other District Cases: *{other_district_or_unassigned}*")
 
     if total_cases > 0:
         completion_pct = (total_completed / total_cases) * 100
@@ -709,7 +730,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE:
         return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
 
-    text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
+    text = "Select an Adama District Technician to view their weekly cases report (Monday - Sunday):"
     keyboard = []
     for tech in sorted(ALLOWED_TECHNICIANS):
         keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
@@ -787,7 +808,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if data == "back_to_techs":
-        text = "Select an Adama District Technician to view their weekly cases report (Monday - Saturday):"
+        text = "Select an Adama District Technician to view their weekly cases report (Monday - Sunday):"
         keyboard = []
         for tech in sorted(ALLOWED_TECHNICIANS):
             keyboard.append([InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")])
