@@ -4,7 +4,7 @@ import asyncio
 import threading
 import json
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from flask import Flask
 
@@ -28,8 +28,13 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 🚨 MAINTENANCE SWITCH (Set to False to turn the bot back on normally)
-MAINTENANCE_MODE = True
+# 🚨 MAINTENANCE SWITCH (አላርሙ እንዲሰራ ወደ False ተቀይሯል)
+MAINTENANCE_MODE = False
+
+# የኢትዮጵያን ሰዓት (East Africa Time) ለማግኘት የምንጠቀምበት ፈንክሽን
+def get_eat_now():
+    # በሰርቨር ላይ UTC ሰዓት ስለሚሆን 3 ሰዓት እንጨምርበታለን
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
 if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
@@ -98,12 +103,15 @@ def clean_extracted_value(data, key_hierarchy):
     return ""
 
 def get_relative_time(date_obj):
-    now = datetime.now()
+    now = get_eat_now()  # የተስተካከለ የኢትዮጵያ ሰዓት
     diff = now - date_obj
     seconds = diff.total_seconds()
     
     if seconds < 0:
-        return "0min", "0min"
+        minutes = abs(int(seconds // 60))
+        if minutes < 2:
+            return "Just now", "Just now"
+        return f"{minutes}min", f"{minutes}min"
         
     minutes = int(seconds // 60)
     hours = int(minutes // 60)
@@ -209,27 +217,39 @@ async def scrape_website_cases():
                     if not tech_phone:
                         tech_phone = "-"
 
-                    created_at = entry.get('created_at') or entry.get('Reported At')
+                    # 🕒 የሰዓት አወሳሰድ ማስተካከያ (Registered Time Extraction)
+                    # 11:57:00 የሚለውን በትክክል ለመፍታት ቀዳሚዎቹ ፎርማቶች ተስተካክለዋል
+                    created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
                     if not created_at:
                         tech_folder = entry.get('Technician') or entry.get('technician') or {}
                         if isinstance(tech_folder, dict):
-                            created_at = tech_folder.get('created_at')
+                            created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
 
                     date_obj = None
                     date_str = "N/A"
                     
                     if created_at:
                         date_str = str(created_at).strip()
-                        for fmt in ("%d/%m/%Y %I:%M %p", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                        formats_to_try = (
+                            "%d/%m/%Y %H:%M:%S",    # 18/07/2026 11:57:00 (ያለ AM/PM ለሚመጣው 24-hr)
+                            "%d/%m/%Y %I:%M %p",    # 18/07/2026 11:57 AM
+                            "%d/%m/%Y %H:%M",       # 18/07/2026 11:57
+                            "%Y-%m-%d %H:%M:%S",    # 2026-07-18 11:57:00
+                            "%Y-%m-%dT%H:%M:%S",    # 2026-07-18T11:57:00
+                            "%d/%m/%Y",
+                            "%Y-%m-%d"
+                        )
+                        
+                        clean_time_str = date_str.split(".")[0]
+                        for fmt in formats_to_try:
                             try:
-                                clean_time_str = date_str.split(".")[0]
                                 date_obj = datetime.strptime(clean_time_str, fmt)
                                 break
                             except ValueError:
                                 continue
                                 
                     if not date_obj:
-                        date_obj = datetime.now()
+                        date_obj = get_eat_now()
                         date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
                     else:
                         date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
@@ -303,53 +323,64 @@ async def terminate_case_on_dashboard(case_id):
 # 5. AUTOMATIC PENDING MONITOR (10-MIN FRESH)
 # ==========================================
 async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
-    # If system is down for maintenance, suspend automatic tracking messages
     if MAINTENANCE_MODE:
         return
 
     if not NOTIFICATION_CHAT_ID:
+        logger.warning("Notification Chat ID is missing! Alarm skipped.")
         return
 
+    logger.info("Checking dashboard for new Adama cases (Last 10 minutes)...")
     cases, status = await scrape_website_cases()
     if status != "OK":
+        logger.error(f"Dashboard scraper failed during alarm scan: {status}")
         return
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     
-    now = datetime.now()
-    ten_minutes_ago = now - timedelta(minutes=12)
+    now = get_eat_now()
+    ten_minutes_ago = now - timedelta(minutes=11) # የ10 ደቂቃ ገደብ ጥበቃ
 
     new_pending_cases = []
     for c in pending_cases:
+        # ባለፉት 10 ደቂቃ ውስጥ የተመዘገበ እና ከዚህ በፊት አላርም ያልተላከለት ኬስ
         if c['date_obj'] >= ten_minutes_ago and c['case_id'] not in SENT_CASES_TRACKER:
             new_pending_cases.append(c)
             SENT_CASES_TRACKER.add(c['case_id'])
 
     if not new_pending_cases:
+        logger.info("No new cases registered in the last 10 minutes.")
         return
 
     for case in new_pending_cases:
         notif_text = (
-            f"*ATM Incident Notification*\n\n"
-            f"📄 *ID:* {case['case_id']},\n"
-            f"🏦 *Bank:* {case['bank']},\n"
-            f"⚠️ *Issue:* {case['issue']},\n"
-            f"🏢 *Branch:* {case['branch']},\n"
-            f"📍 *District:* {case['district']},\n"
-            f"💬 *Comment:* {case['comment']},\n"
-            f"🕒 *Reported at:* {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')}"
+            f"🚨 *New ATM Incident Notification* 🚨\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📄 *ID:* `{case['case_id']}`\n"
+            f"🏦 *Bank:* {case['bank']}\n"
+            f"🏢 *Branch:* {case['branch']}\n"
+            f"⚠️ *Issue:* {case['issue']}\n"
+            f"📍 *District:* {case['district']}\n"
+            f"💬 *Comment:* {case['comment']}\n"
+            f"🕒 *Reported at:* {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 _Status: Registered just now!_"
         )
         
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("Open In tech24et.com dashboard", url="https://tech24et.com/")]
         ])
         
-        await context.bot.send_message(
-            chat_id=NOTIFICATION_CHAT_ID,
-            text=notif_text,
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=NOTIFICATION_CHAT_ID,
+                text=notif_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+            logger.info(f"Alarm sent successfully for new case {case['case_id']}")
+        except Exception as e:
+            logger.error(f"Failed to send message for case {case['case_id']}: {str(e)}")
 
 # ==========================================
 # 5.5 GLOBAL MAINTENANCE RESPONSE GENERATOR
@@ -394,7 +425,7 @@ def build_case_detail_ui(case):
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
 def format_technician_weekly_report(cases, selected_tech):
-    now = datetime.now()
+    now = get_eat_now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
@@ -443,8 +474,7 @@ def format_technician_weekly_report(cases, selected_tech):
     return "\n".join(report_lines)
 
 def format_weekly_summary_matrix(cases):
-    """የዚህን ሳምንት ሰኞ-ቅዳሜ ብቻ ያሰላል (Weekly Matrix Summary)"""
-    now = datetime.now()
+    now = get_eat_now()
     start_of_week = now - timedelta(days=now.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=5, hours=23, minutes=59, seconds=59)
@@ -656,11 +686,12 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ *Export Cancelled:* No cases matched query scope.", parse_mode="Markdown")
 
     excel_file = generate_excel_bytes(cases)
-    current_month = datetime.now().strftime('%B').lower()
-    excel_file.name = f"case-report-2026-{current_month}.xlsx"
+    current_month = get_eat_now().strftime('%B').lower()
+    current_year = get_eat_now().strftime('%Y')
+    excel_file.name = f"case-report-{current_year}-{current_month}.xlsx"
 
     caption_text = (
-        f"📊 *ATM Cases Report – {datetime.now().strftime('%B %Y')}*\n\n"
+        f"📊 *ATM Cases Report – {get_eat_now().strftime('%B %Y')}*\n\n"
         "This report contains all ATM cases reported for monitoring."
     )
 
@@ -679,7 +710,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     if MAINTENANCE_MODE:
-        # Edit the existing message or send a clear alert text response
         try:
             await query.edit_message_text(get_maintenance_message(), parse_mode="Markdown")
         except Exception:
