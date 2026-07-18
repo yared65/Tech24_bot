@@ -475,11 +475,11 @@ def format_weekly_summary_matrix(cases):
             total_ongoing += 1
 
     for tech, stats in tech_stats.items():
-        report_lines.append(f"Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.")
+        report_lines.append(f" 👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
 
     report_lines.append("")
     total_cases = total_completed + total_ongoing
-    report_lines.append(f"Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
+    report_lines.append(f" 🟧 Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
 
     if total_cases > 0:
         completion_pct = (total_completed / total_cases) * 100
