@@ -33,11 +33,13 @@ MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
+    "Abel Demeke",
+    "Feab Worku",
     "Girmaye Kelil",
-    "Israel Aklilu",
     "Yared Girma",
+    "Yeshurun Asefa",
     "Yohanis Getiye",
-   
+    "Yonael Daniel"
 ]
 
 def get_eat_now():
@@ -360,7 +362,6 @@ async def start_independent_alarm_loop(bot):
                         f"📌 _Status: Pending Action / Unresolved_"
                     )
                     
-                    # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                     
                     if NOTIFICATION_CHAT_ID:
@@ -392,7 +393,6 @@ async def start_independent_alarm_loop(bot):
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"⏳ _Duration: Still Pending!_"
                         )
-                        # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
                         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                         
                         if NOTIFICATION_CHAT_ID:
@@ -450,6 +450,44 @@ def build_case_detail_ui(case):
 # ==========================================
 # 7. EXCEL & SPECIFIC REPORT FORMATTERS
 # ==========================================
+def format_technician_daily_report(cases, selected_tech, report_type):
+    now = get_eat_now()
+    today_str = now.strftime("%d/%m/%Y")
+    
+    filtered_cases = []
+    for c in cases:
+        if c['date_obj'].strftime("%d/%m/%Y") == today_str:
+            matched_tech = find_matching_technician(c['technician'])
+            if matched_tech and matched_tech.lower() == selected_tech.lower():
+                filtered_cases.append(c)
+
+    title_type = "Dashboard Cases" if report_type == "dash" else "Telegram & PM"
+    
+    if not filtered_cases:
+        return (
+            f"📋 *Adama District Daily Report ({title_type}) - {selected_tech}* 📋\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📭 *Currently, there are no recorded cases for this technician today ({today_str}).*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
+    report_lines = [f"📋 *Adama District Daily Report ({title_type}) - {selected_tech}* 📋\n"]
+    report_lines.append(f"📅 Date: {today_str}\n━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    for idx, c in enumerate(filtered_cases, start=1):
+        status_emoji = "✅ Completed" if c['status'] == "Completed" else "⏳ On going"
+        line = (
+            f"{idx}. ID: {c['case_id']}\n"
+            f"🏦 Bank: {c['bank']} ({c['branch']} branch)\n"
+            f"⚠️ Issue: {c['issue']}\n"
+            f"📌 Status: {status_emoji}\n"
+            f"💬 Comment: {c['comment']}\n"
+            f"----------------------------------------"
+        )
+        report_lines.append(line)
+
+    return "\n".join(report_lines)
+
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
     start_of_week = now - timedelta(days=now.weekday())
@@ -627,6 +665,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
         "💻 *Available Commands Menu:*\n"
         "• /pending - View currently open / unresolved cases\n"
+        "• /daily - View daily report by technician selection\n"
         "• /report - View weekly performance metrics by technician\n"
         "• /summary - View overall weekly matrix summary\n"
         "• /export - Download structured incident Excel spreadsheets"
@@ -659,7 +698,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📌 _Status: Pending Action / Unresolved_"
                 )
-                # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                 await context.bot.send_message(chat_id=chat_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
                 SENT_CASES_TRACKER.add(case['case_id'])
@@ -680,7 +718,6 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     if not pending_cases:
-        # 🔗 እዚህ ጋርም ወደ Login ፔጅ ብቻ እንዲወስድ ተስተካክሏል
         keyboard = [[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]]
         return await update.message.reply_text(
             "✅ All Adama cases are completed! No pending cases found.",
@@ -700,6 +737,17 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if MAINTENANCE_MODE:
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
+    text = "Select an Adama District Technician to view their Daily report:"
+    keyboard = []
+    for tech in sorted(ALLOWED_TECHNICIANS):
+        keyboard.append([InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE:
@@ -768,6 +816,87 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
     if data == "cancel_action":
         await query.message.delete()
+        return
+
+    # 1. ቴክኒሺያን ስም ሲነካ የሚመጣው ገጽ
+    if data.startswith("dtech_"):
+        tech_name = data.split("_")[1]
+        confirm_text = (
+            f"🔥 *Daily Report*\n"
+            f"精 _For Dashboard case select Dashboard button_\n"
+            f"精 _For Telegram case and PM select Telegram & PM button_"
+        )
+        confirm_keyboard = [
+            [
+                InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
+                InlineKeyboardButton("Telegram & PM", callback_data=f"drpt_tgpm_{tech_name}")
+            ],
+            [InlineKeyboardButton("🔙 Back to Technicians", callback_data="back_to_daily_techs")]
+        ]
+        await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
+        return
+
+    # 2. Dashboard ሲነካ የዕለቱ ኬሶች በባተን የሚደረደሩበት ገጽ
+    if data.startswith("ddash_"):
+        tech_name = data.split("_")[1]
+        await query.edit_message_text("⏳ Syncing daily logs...")
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ API Sync Fail: {status}")
+
+        now = get_eat_now()
+        today_str = now.strftime("%d/%m/%Y")
+        
+        # የዛሬ ኬሶችን ለተመረጠው ቴክኒሺያን መለየት
+        filtered_cases = []
+        for c in cases:
+            if c['date_obj'].strftime("%d/%m/%Y") == today_str:
+                matched_tech = find_matching_technician(c['technician'])
+                if matched_tech and matched_tech.lower() == tech_name.lower():
+                    filtered_cases.append(c)
+
+        if not filtered_cases:
+            back_kb = [[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]]
+            return await query.edit_message_text(
+                text=f"📭 *No dashboard cases found for {tech_name} today ({today_str}).*",
+                reply_markup=InlineKeyboardMarkup(back_kb),
+                parse_mode="Markdown"
+            )
+
+        text = f"📋 *Today's Dashboard Cases for {tech_name}:*"
+        keyboard = []
+        for c in filtered_cases:
+            # ባተኑ ላይ [Case ID እና Branch] ብቻ እንዲታይ
+            btn_label = f"ID: {c['case_id']} | {c['branch']}"
+            keyboard.append([InlineKeyboardButton(btn_label, callback_data=f"view_{c['case_id']}")])
+
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")])
+        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    # 3. Telegram & PM ሲነካ
+    if data.startswith("drpt_"):
+        parts = data.split("_")
+        report_type = parts[1] 
+        tech_name = parts[2]
+        
+        await query.edit_message_text("⏳ Generating daily report...")
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ Error pulling logs: {status}")
+            
+        report_output = format_technician_daily_report(cases, tech_name, report_type)
+        back_kb = [[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]]
+        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="Markdown")
+        return
+
+    if data == "back_to_daily_techs":
+        text = "Select an Adama District Technician to view their Daily report:"
+        keyboard = []
+        for tech in sorted(ALLOWED_TECHNICIANS):
+            keyboard.append([InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
+        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("wrep_"):
@@ -840,6 +969,7 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Initialize bot profile"),
         BotCommand("pending", "View open and unresolved cases"),
+        BotCommand("daily", "View daily technician cases report"),
         BotCommand("report", "View weekly technician performance metrics"),
         BotCommand("summary", "View overall weekly summary metrics"),
         BotCommand("export", "Generate incident logs Excel sheet")
@@ -861,6 +991,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("daily", daily_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("export", export_command))
