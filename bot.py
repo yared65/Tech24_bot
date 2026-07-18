@@ -219,7 +219,7 @@ async def scrape_website_cases():
                         tech_phone = "-"
 
                     created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                    if not created_at:  # ⚠️ እዚህ ጋር የነበረችው ስህተት ተስተካክላለች!
+                    if not created_at:  # 🔍 የተስተካከለችው typo
                         tech_folder = entry.get('Technician') or entry.get('technician') or {}
                         if isinstance(tech_folder, dict):
                             created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
@@ -343,12 +343,18 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
         case_id = case['case_id']
         case_time = case['date_obj']
 
-        # ⚡ 1. አዲስ የተመዘገበ ኬስ (በየ30 ሰከንዱ በሚደረገው ፍተሻ ፈጥኖ ወዲያውኑ ይልካል)
+        # ⚡ 1. መጀመሪያ፡ ቦቱ ሲነሳ ክፍት የነበሩትን (የቆዩትንም ጭምር) ለመጀመሪያ ጊዜ ሲያገኛቸው ወዲያው አላርም ያደርጋል!
         if case_id not in SENT_CASES_TRACKER:
             SENT_CASES_TRACKER.add(case_id)
             
+            time_diff = now - case_time
+            hours_ago = int(time_diff.total_seconds() // 3600)
+            mins_ago = int((time_diff.total_seconds() % 3600) // 60)
+            
+            age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
+
             notif_text = (
-                f"🚨 *New ATM Incident Notification* 🚨\n"
+                f"🚨 *ATM Incident Alert* 🚨\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📄 *ID:* `{case_id}`\n"
                 f"🏦 *Bank:* {case['bank']}\n"
@@ -356,7 +362,7 @@ async def auto_monitor_dashboard(context: ContextTypes.DEFAULT_TYPE):
                 f"⚠️ *Issue:* {case['issue']}\n"
                 f"📍 *District:* {case['district']}\n"
                 f"💬 *Comment:* {case['comment']}\n"
-                f"🕒 *Reported at:* {case['date_raw']}\n\n"
+                f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📌 _Status: Pending Action / Unresolved_"
             )
