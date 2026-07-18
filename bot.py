@@ -29,7 +29,7 @@ EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
 # 🚨 MAINTENANCE SWITCH
-MAINTENANCE_MODE = False
+MAINTENANCE_MODE = True 
 
 # 🎯 ALLOWED TECHNICIANS
 # 💡 አዲስ ቴክኒሻን እዚህ ዝርዝር ውስጥ ይጨምሩ። በትልቁም በትናንሹም ቢጻፍ ችግር የለውም፤ ኮዱ ያስተካክለዋል።
