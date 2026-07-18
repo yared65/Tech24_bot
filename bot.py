@@ -34,6 +34,7 @@ MAINTENANCE_MODE = False
 # 🎯 ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
     "Girmaye Kelil",
+    "Israel Aklilu",
     "Yared Girma",
     "Yohanis Getiye",
    
