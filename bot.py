@@ -461,7 +461,12 @@ def format_technician_daily_report(cases, selected_tech, report_type):
             if matched_tech and matched_tech.lower() == selected_tech.lower():
                 filtered_cases.append(c)
 
-    title_type = "Dashboard Cases" if report_type == "dash" else "Telegram & PM"
+    if report_type == "case":
+        title_type = "Telegram Registered Cases"
+    elif report_type == "pm":
+        title_type = "PM Report"
+    else:
+        title_type = "Dashboard Cases"
     
     if not filtered_cases:
         return (
@@ -818,25 +823,43 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # 1. ቴክኒሺያን ስም ሲነካ የሚመጣው ገጽ
+    # 1. ቴክኒሺያን ስም ሲነካ የሚመጣው ዋና ገጽ
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
         confirm_text = (
-            f"🔥 *Daily Report*\n"
-            f"精 _For Dashboard case select Dashboard button_\n"
-            f"精 _For Telegram case and PM select Telegram & PM button_"
+            f"🔥 *Daily Report*\n\n"
+            f" For Dashboard case select Dashboard button \n"
+            f" For Telegram case and PM select Telegram & PM button"
         )
         confirm_keyboard = [
             [
                 InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
-                InlineKeyboardButton("Telegram & PM", callback_data=f"drpt_tgpm_{tech_name}")
+                InlineKeyboardButton("Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")
             ],
             [InlineKeyboardButton("🔙 Back to Technicians", callback_data="back_to_daily_techs")]
         ]
         await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
         return
 
-    # 2. Dashboard ሲነካ የዕለቱ ኬሶች በባተን የሚደረደሩበት ገጽ
+    # 2. Telegram & PM ሲነካ ወደ ሌላ ገጽ (Telegram and PM report) የሚወስደው ሎጂክ
+    if data.startswith("dtgpm_menu_"):
+        tech_name = data.split("_")[2]
+        tgpm_text = (
+            f" Telegram and PM report \n\n"
+            f"For Telegram registered case clicked  *CASE* button  \n"
+            f"For PM report Clicked *PM* button"
+        )
+        tgpm_keyboard = [
+            [
+                InlineKeyboardButton("CASE", callback_data=f"drpt_case_{tech_name}"),
+                InlineKeyboardButton("PM", callback_data=f"drpt_pm_{tech_name}")
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]
+        ]
+        await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
+        return
+
+    # 3. Dashboard ሲነካ የዕለቱ ኬሶች በባተን የሚደረደሩበት ገጽ
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs...")
@@ -847,7 +870,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         now = get_eat_now()
         today_str = now.strftime("%d/%m/%Y")
         
-        # የዛሬ ኬሶችን ለተመረጠው ቴክኒሺያን መለየት
         filtered_cases = []
         for c in cases:
             if c['date_obj'].strftime("%d/%m/%Y") == today_str:
@@ -866,7 +888,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text = f"📋 *Today's Dashboard Cases for {tech_name}:*"
         keyboard = []
         for c in filtered_cases:
-            # ባተኑ ላይ [Case ID እና Branch] ብቻ እንዲታይ
             btn_label = f"ID: {c['case_id']} | {c['branch']}"
             keyboard.append([InlineKeyboardButton(btn_label, callback_data=f"view_{c['case_id']}")])
 
@@ -874,19 +895,19 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
-    # 3. Telegram & PM ሲነካ
+    # 4. CASE ወይም PM ሲነካ ሪፖርቱን የሚያወጣበት ሎጂክ
     if data.startswith("drpt_"):
         parts = data.split("_")
-        report_type = parts[1] 
+        report_type = parts[1] # 'case' ወይም 'pm'
         tech_name = parts[2]
         
-        await query.edit_message_text("⏳ Generating daily report...")
+        await query.edit_message_text("⏳ Generating report...")
         cases, status = await scrape_website_cases()
         if status != "OK":
             return await query.edit_message_text(f"❌ Error pulling logs: {status}")
             
         report_output = format_technician_daily_report(cases, tech_name, report_type)
-        back_kb = [[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]]
+        back_kb = [[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{tech_name}")]]
         await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="Markdown")
         return
 
