@@ -219,7 +219,7 @@ async def scrape_website_cases():
                         tech_phone = "-"
 
                     created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                    if not created_at:  # 🔍 የተስተካከለችው typo
+                    if not created_at:  # ✅ እዚህ ጋር የነበረው 'create_at' ስህተት ሙሉ በሙሉ ተስተካክሏል
                         tech_folder = entry.get('Technician') or entry.get('technician') or {}
                         if isinstance(tech_folder, dict):
                             created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
@@ -866,7 +866,7 @@ def main():
     
     application.add_handler(CallbackQueryHandler(button_click_handler))
 
-    # ⏱️ የቦቱ የፍተሻ ጊዜ በየ 30 ሰከንዱ እንዲሆን ተስተካክሏል (አዲስ ኬስ ሲገባ ወዲያው እንዲልክ)
+    # ⏱️ የቦቱ የፍተሻ ጊዜ በየ 30 ሰከንዱ እንዲሆን ተስተካክሏል
     job_queue = application.job_queue
     job_queue.run_repeating(auto_monitor_dashboard, interval=30, first=5)
 
