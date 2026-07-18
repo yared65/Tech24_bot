@@ -310,10 +310,10 @@ async def terminate_case_on_dashboard(case_id):
             return False, str(e)
 
 # ==========================================
-# 5. INDEPENDENT ASYNC ALARM LOOP (NO JOBQUEUE DEPENDENCY)
+# 5. FIXED INTERNAL AUTOMATIC ALARM LOOP
 # ==========================================
 async def start_independent_alarm_loop(bot):
-    logger.info("Background Alarm engine fully initiated...")
+    logger.info("Background Alarm Engine successfully launched inside Application Loop.")
     while True:
         try:
             if MAINTENANCE_MODE or not NOTIFICATION_CHAT_ID:
@@ -389,7 +389,7 @@ async def start_independent_alarm_loop(bot):
         except Exception as e:
             logger.error(f"Error inside independent background loop: {str(e)}")
         
-        await asyncio.sleep(30) # በየ30 ሰከንዱ ፍተሻ ያደርጋል
+        await asyncio.sleep(30)
 
 # ==========================================
 # 5.5 GLOBAL MAINTENANCE RESPONSE GENERATOR
@@ -789,7 +789,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. STARTUP MENU INITIALIZER
+# 10. STARTUP MENU INITIALIZER & LOOP STARTER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
@@ -800,6 +800,9 @@ async def post_init(application: Application) -> None:
         BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
+    
+    # 🚀 የባክግራውንድ አላርሙን በቴሌግራም አሲንክ ሉፕ ውስጥ በትክክል እዚህ ላይ እናስጀምረዋለን!
+    asyncio.create_task(start_independent_alarm_loop(application.bot))
 
 # ==========================================
 # 11. ENGINE INITIATION
@@ -811,6 +814,7 @@ def main():
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
+    # post_init እዚህ ላይ ተገናኝቷል
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
@@ -819,10 +823,6 @@ def main():
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CallbackQueryHandler(button_click_handler))
-
-    # 🚀 የባክግራውንድ አላርሙን ያለምንም JobQueue ችግር በተለየ Thred/Loop ውስጥ ማስጀመር
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_independent_alarm_loop(application.bot))
 
     application.run_polling()
 
