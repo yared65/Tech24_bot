@@ -627,7 +627,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data
     if data == "cancel_action":
-        USER_FORM_STATES.pop(chat_id, None) # ማንኛውንም የተከፈተ ስቴት ሰርዝ
+        USER_FORM_STATES.pop(chat_id, None)
         await query.message.delete()
         return
 
@@ -653,7 +653,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
-    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES BY ID & BRANCH
+    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
@@ -672,7 +672,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 5. 🛠️ CASE SELECTED FROM DASHBOARD -> SCRAPE IT & TRIGGER ADDITIONAL GOOGLE FORM FLOW
+    # 5. 🛠️ CASE SELECTED FROM DASHBOARD -> TRIGGERS REMAINING FORM INPUTS
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extraction data for Google form mapping...")
@@ -682,9 +682,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         target_case = next((c for c in cases if c['case_id'] == case_id), None)
         if not target_case: return await query.edit_message_text("❌ Selected record could not be found.")
 
-        # አዲሱን የፎርም መረጃ ማጠራቀሚያ ስቴት ማዘጋጀት
+        # የጉግል ፎርሙን entry መለያዎች እዚህ ላይ ያከማቻል
         USER_FORM_STATES[chat_id] = {
-            'step': 'ASK_PM_TYPE', # የመጀመሪያው ተጨማሪ ጥያቄ
+            'step': 'ASK_PM_TYPE',
             'tech_name': target_case['technician'],
             'extracted_payload': {
                 'entry.283120155': target_case['case_id'],        # Case ID
@@ -697,7 +697,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             }
         }
         
-        # ተጨማሪ ጥያቄ 1፡ የ PM ሁኔታ
         pm_kb = [
             [InlineKeyboardButton("PM Done", callback_data="fpm_Done"),
              InlineKeyboardButton("PM Not Done", callback_data="fpm_Not_Done")],
@@ -707,19 +706,21 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # 6. ℹ️ HANDLING PM BUTTON ANSWERS
+    # 6. HANDLING PM SELECTION
     if data.startswith("fpm_"):
         pm_value = data.split("_")[1] if len(data.split("_")) == 2 else f"{data.split('_')[1]} {data.split('_')[2]}"
         if chat_id not in USER_FORM_STATES:
             return await context.bot.send_message(chat_id=chat_id, text="❌ የፎርም መሙላት ሂደቱ ጊዜ አልፎበታል፣ እባክዎ እንደገና ይጀምሩ።")
         
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") # PM Field ID
+        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") 
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
-        await query.edit_message_text(text="✍️ *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", parse_mode="Markdown")
+        # የባክ በተን እና መግለጫ
+        kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
+        await query.edit_message_text(text="编 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
-    # 7. 🚀 PRE-SUBMIT PREVIEW & SUBMIT CONFIRMATION ENGINE
+    # 7. PRE-SUBMIT PREVIEW SHOWING ALL FIELDS WITH BACK & SUBMIT ACTIONS
     if data == "f_trigger_preview":
         if chat_id not in USER_FORM_STATES: return
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
@@ -733,10 +734,11 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🏢 Branch: {payload.get('entry.1983056024')}\n"
             f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
             f"📌 Status: {payload.get('entry.1994644026')}\n"
-            f"🔧 PM: {payload.get('entry.1011663080')}\n"
+            f"🔧 PM Status: {payload.get('entry.1011663080')}\n"
             f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
             f"💬 Comment: {payload.get('entry.38555627')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"እባክዎ መረጃውን አረጋግጠው 'Submit Form' የሚለውን ይጫኑ።"
         )
         final_kb = [
             [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
@@ -745,28 +747,30 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="Markdown")
         return
 
+    # 8. POST ALL ACCUMULATED DATA TO GOOGLE FORM
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
-        await query.edit_message_text("🚀 Sending request bundle to Google Forms API engine...")
+        await query.edit_message_text("🚀 Sending comprehensive data bundle to Google Forms...")
         
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(FORM_URL, data=payload)
                 if resp.status_code in [200, 302]:
-                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Daily report transaction fully synced.", parse_mode="Markdown")
+                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Dashboard & technician inputs fully synchronized.", parse_mode="Markdown")
                 else:
-                    await query.edit_message_text(f"❌ *Submission Failed.* Rejected by Google forms engine (Status: {resp.status_code})")
+                    await query.edit_message_text(f"❌ *Submission Failed.* Google form engine returned status code: {resp.status_code}")
         except Exception as e:
-            await query.edit_message_text(f"❌ *Network/API Error:* {str(e)}")
+            await query.edit_message_text(f"❌ *Network / Connection Error:* {str(e)}")
         
         USER_FORM_STATES.pop(chat_id, None)
         return
 
     if data.startswith("drpt_"):
         parts = data.split("_")
-        report_output = format_technician_daily_report(await scrape_website_cases()[0], parts[2], parts[1])
-        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2] Rockford}")]], parse_mode="Markdown"))
+        cases, _ = await scrape_website_cases()
+        report_output = format_technician_daily_report(cases, parts[2], parts[1])
+        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2]}")]], parse_mode="Markdown"))
         return
 
     if data == "back_to_daily_techs":
@@ -809,33 +813,32 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. TEXT MESSAGE HANDLER FOR FORMS
+# 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
 # ==========================================
 async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id not in USER_FORM_STATES:
-        return # የፎርም ስቴት ውስጥ ካልሆነ ችላ በለው
+    if chat_id not in USER_FORM_STATES: return
 
     state_data = USER_FORM_STATES[chat_id]
     
-    # ✍️ የ Resolution መረጃዎችን መቀበል
+    # ✍️ የ Resolution (መፍትሄ) ፅሁፍ ግብአት መቀበያ
     if state_data['step'] == 'WAITING_FOR_RESOLUTION':
         resolution_text = update.message.text
         if not resolution_text or resolution_text.strip() == "":
             await update.message.reply_text("❌ እባክዎ ትክክለኛ የፅሁፍ መግለጫ ያስገቡ።")
             return
             
-        state_data['extracted_payload']['entry.245892019'] = resolution_text # Resolution Field ID
+        state_data['extracted_payload']['entry.245892019'] = resolution_text 
         state_data['step'] = 'PREVIEW_READY'
         
         preview_kb = [
-            [InlineKeyboardButton("🔎 View Review & Preview", callback_data="f_trigger_preview")],
+            [InlineKeyboardButton("🔎 View Summary & Submit", callback_data="f_trigger_preview")],
             [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
         ]
-        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* ፎርሙን ከመላክዎ በፊት ቅድመ-ዕይታ መመልከት ይችላሉ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* እባክዎ ከታች ያለውን ማረጋገጫ በተን ይጫኑ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
 
 # ==========================================
-# 11. STARTUP MENU INITIALIZER & LOOP STARTER
+# 11. STARTUP MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
@@ -868,8 +871,6 @@ def main():
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CallbackQueryHandler(button_click_handler))
-    
-    # የቴክኒሻኖችን ፅሁፍ ግብአት ለመቀበል የተጨመረ ሪሲቨር
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_input_handler))
 
     application.run_polling()
