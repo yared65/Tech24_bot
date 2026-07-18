@@ -32,15 +32,11 @@ PASSWORD = os.environ.get("PASSWORD")
 MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS
-# በዳሽቦርዱ ሊስት (Drop-down) ላይ እንዴት እንደሚመጡ ልክ በዚያው አጻጻፍ እዚህ ያስገቡ
 ALLOWED_TECHNICIANS = [
-    "Abel Demeke",
-    "Feab Worku",
     "Girmaye Kelil",
     "Yared Girma",
-    "Yeshurun Asefa",
     "Yohanis Getiye",
-    "Yonael Daniel"
+   
 ]
 
 def get_eat_now():
@@ -131,23 +127,14 @@ def get_relative_time(date_obj):
         time_str = f"{minutes}min"
     return time_str, time_str
 
-# ==========================================
-# Helper: Strict Exact Matcher (Drop-down Safe)
-# ==========================================
 def find_matching_technician(dashboard_tech_name):
-    """
-    ዳሽቦርዱ ላይ ያለው ስም ሁልጊዜ ወጥ በሆነ ሊስት ስለሚመጣ፣ 
-    ፊደል በፊደል በትክክል (Exact Match) የሚገጥመውን ብቻ ይፈልጋል።
-    """
     if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-"]:
         return None
-        
-    dash_clean = str(dashboard_tech_name).strip().lower()
-    
+    dash_clean = " ".join(str(dashboard_tech_name).strip().split()).lower()
     for tech in ALLOWED_TECHNICIANS:
-        if tech.lower() == dash_clean:
+        tech_clean = " ".join(str(tech).strip().split()).lower()
+        if tech_clean == dash_clean:
             return tech
-            
     return None
 
 # ==========================================
@@ -253,15 +240,9 @@ async def scrape_website_cases():
                     if created_at:
                         date_str = str(created_at).strip()
                         formats_to_try = (
-                            "%d/%m/%Y %H:%M:%S",
-                            "%d/%m/%Y %I:%M %p",
-                            "%d/%m/%Y %H:%M",
-                            "%Y-%m-%d %H:%M:%S",
-                            "%Y-%m-%dT%H:%M:%S",
-                            "%d/%m/%Y",
-                            "%Y-%m-%d"
+                            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y %H:%M",
+                            "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"
                         )
-                        
                         clean_time_str = date_str.split(".")[0]
                         for fmt in formats_to_try:
                             try:
@@ -288,19 +269,10 @@ async def scrape_website_cases():
                         status_text = "On going"
 
                     scraped_cases.append({
-                        'case_id': case_id,
-                        'bank': bank,
-                        'district': district,
-                        'branch': branch,
-                        'terminal': terminal_no,
-                        'atm_name': terminal_name,
-                        'issue': issue,
-                        'status': status_text,
-                        'comment': comment,
-                        'technician': technician,
-                        'tech_phone': tech_phone,
-                        'date_raw': date_str,
-                        'date_obj': date_obj
+                        'case_id': case_id, 'bank': bank, 'district': district, 'branch': branch,
+                        'terminal': terminal_no, 'atm_name': terminal_name, 'issue': issue,
+                        'status': status_text, 'comment': comment, 'technician': technician,
+                        'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj
                     })
 
             return scraped_cases, "OK"
@@ -315,10 +287,8 @@ async def terminate_case_on_dashboard(case_id):
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
+        'Accept': 'application/json', 'Content-Type': 'application/json',
+        'Origin': 'https://tech24et.com', 'Referer': 'https://tech24et.com/'
     }
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0, verify=False) as client:
@@ -389,7 +359,8 @@ async def start_independent_alarm_loop(bot):
                         f"📌 _Status: Pending Action / Unresolved_"
                     )
                     
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
+                    # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                     
                     if NOTIFICATION_CHAT_ID:
                         try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
@@ -420,7 +391,8 @@ async def start_independent_alarm_loop(bot):
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"⏳ _Duration: Still Pending!_"
                         )
-                        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
+                        # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
+                        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                         
                         if NOTIFICATION_CHAT_ID:
                             try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
@@ -686,7 +658,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📌 _Status: Pending Action / Unresolved_"
                 )
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Dashboard", url="https://tech24et.com/")]])
+                # 🔗 ወደ Login ፔጅ ብቻ እንዲወስድ የተደረገ ሊንክ
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                 await context.bot.send_message(chat_id=chat_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
                 SENT_CASES_TRACKER.add(case['case_id'])
     except Exception as e:
@@ -706,7 +679,8 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pending_cases = [c for c in cases if c['status'] == "On going"]
     if not pending_cases:
-        keyboard = [[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/")]]
+        # 🔗 እዚህ ጋርም ወደ Login ፔጅ ብቻ እንዲወስድ ተስተካክሏል
+        keyboard = [[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]]
         return await update.message.reply_text(
             "✅ All Adama cases are completed! No pending cases found.",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -786,10 +760,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     if MAINTENANCE_MODE:
-        try:
-            await query.edit_message_text(get_maintenance_message(), parse_mode="Markdown")
-        except Exception:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=get_maintenance_message(), parse_mode="Markdown")
+        try: await query.edit_message_text(get_maintenance_message(), parse_mode="Markdown")
+        except Exception: await context.bot.send_message(chat_id=update.effective_chat.id, text=get_maintenance_message(), parse_mode="Markdown")
         return
 
     data = query.data
