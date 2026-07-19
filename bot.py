@@ -37,7 +37,6 @@ ALLOWED_TECHNICIANS = [
     "Yared Girma","Yohanis Getiye",
 ]
 
-# የጉግል ፎርም ማስገቢያ ሊንክ
 FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse"
 
 def get_eat_now():
@@ -54,10 +53,10 @@ SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
 ACTIVE_USERS_TRACKER = set()
 
-# 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ
+# 📝 MULTI-STEP FORM STATE TRACKER
 USER_FORM_STATES = {}
 
-# 🌐 GLOBAL HTTP CLIENT (ቦቱ እንዳይቆም/እንዳይዝረከረክ በጋራ የሚሰራ)
+# 🌐 GLOBAL HTTP CLIENT
 HTTP_CLIENT = httpx.AsyncClient(
     headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -67,7 +66,7 @@ HTTP_CLIENT = httpx.AsyncClient(
         'Referer': 'https://tech24et.com/'
     },
     follow_redirects=True,
-    timeout=10.0, # ታይምአውት ወደ 10 ሰከንድ ዝቅ ተደርጓል
+    timeout=15.0,
     verify=False
 )
 
@@ -106,7 +105,6 @@ def clean_extracted_value(data, key_hierarchy):
     parsed_data = safe_parse_json(data) if isinstance(data, str) else data
     if not isinstance(parsed_data, dict): return str(parsed_data)
     
-    # መጀመሪያ ዋናዎቹን የቁልፍ ቅደም ተከተሎች መፈለግ
     for key in key_hierarchy:
         if key in parsed_data and parsed_data[key] is not None:
             val = parsed_data[key]
@@ -114,7 +112,6 @@ def clean_extracted_value(data, key_hierarchy):
                 return clean_extracted_value(val, key_hierarchy)
             return str(val)
             
-    # ማለቂያ የሌለው ሉፕ (Infinite Loop) እንዳይፈጠር ተስተካክሏል
     for key in key_hierarchy:
         for k, v in parsed_data.items():
             if isinstance(v, dict) and key in v:
@@ -297,96 +294,108 @@ async def terminate_case_on_dashboard(case_id):
 # ==========================================
 # 5. AUTOMATIC ALARM & OVERDUE LOOP
 # ==========================================
+async def check_and_alert_cases(bot, target_user_id=None):
+    """Core function to broadcast or directly alert pending cases instantly."""
+    cases, status = await scrape_website_cases()
+    if status != "OK":
+        logger.error(f"Alert Engine Scraper error: {status}")
+        return
+
+    pending_statuses = ["on going", "pending", "open", "0"]
+    pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
+    now = get_eat_now()
+
+    for case in pending_cases:
+        case_id = case['case_id']
+        case_time = case['date_obj']
+
+        time_diff = now - case_time
+        hours_ago = int(time_diff.total_seconds() // 3600)
+        mins_ago = int((time_diff.total_seconds() % 3600) // 60)
+        age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
+
+        notif_text = (
+            f"🚨 *ATM Incident Alert* 🚨\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📄 *ID:* `{case_id}`\n"
+            f"🏦 *Bank:* {case['bank']}\n"
+            f"🏢 *Branch:* {case['branch']}\n"
+            f"⚠️ *Issue:* {case['issue']}\n"
+            f"📍 *District:* {case['district']}\n"
+            f"💬 *Comment:* {case['comment']}\n"
+            f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 _Status: Pending Action / Unresolved_"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
+        
+        # If triggered by a specific user doing /start, send to them directly regardless of tracker
+        if target_user_id:
+            try:
+                await bot.send_message(chat_id=target_user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Failed to send startup alert to user {target_user_id}: {str(e)}")
+            if case_id not in SENT_CASES_TRACKER:
+                SENT_CASES_TRACKER.add(case_id)
+            continue
+
+        # Regular Background Tracker Loop
+        if case_id not in SENT_CASES_TRACKER:
+            SENT_CASES_TRACKER.add(case_id)
+            
+            if NOTIFICATION_CHAT_ID:
+                try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                except Exception: pass
+
+            for user_id in list(ACTIVE_USERS_TRACKER):
+                try: await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                except Exception: pass
+            continue
+
+        # Overdue escalation tracker (Every 5 Hours)
+        time_elapsed = now - case_time
+        if time_elapsed >= timedelta(hours=5):
+            last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
+            if last_reminder is None or (now - last_reminder) >= timedelta(hours=5):
+                SENT_REMINDERS_TRACKER[case_id] = now
+                hours_passed = int(time_elapsed.total_seconds() // 3600)
+                
+                reminder_text = (
+                    f"⚠️ *OVERDUE INCIDENT REMINDER (>{hours_passed} Hours)* ⚠️\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"This case has been active for more than {hours_passed} hours. Please investigate.\n\n"
+                    f"📄 *ID:* `{case_id}`\n"
+                    f"🏦 *Bank:* {case['bank']} ({case['branch']})\n"
+                    f"⚠️ *Issue:* {case['issue']}\n"
+                    f"👤 *Technician:* {case['technician']}\n"
+                    f"🕒 *Reported at:* {case['date_raw']}\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ _Duration: Still Pending!_"
+                )
+                
+                if NOTIFICATION_CHAT_ID:
+                    try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                    except Exception: pass
+                for user_id in list(ACTIVE_USERS_TRACKER):
+                    try: await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                    except Exception: pass
+
 async def start_independent_alarm_loop(bot):
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
     while True:
         try:
-            if MAINTENANCE_MODE:
-                await asyncio.sleep(30)
-                continue
-
-            cases, status = await scrape_website_cases()
-            if status != "OK":
-                logger.error(f"Background Scan Scraper error: {status}")
-                await asyncio.sleep(30)
-                continue
-
-            pending_statuses = ["on going", "pending", "open", "0"]
-            pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
-            now = get_eat_now()
-
-            for case in pending_cases:
-                case_id = case['case_id']
-                case_time = case['date_obj']
-
-                if case_id not in SENT_CASES_TRACKER:
-                    SENT_CASES_TRACKER.add(case_id)
-                    time_diff = now - case_time
-                    hours_ago = int(time_diff.total_seconds() // 3600)
-                    mins_ago = int((time_diff.total_seconds() % 3600) // 60)
-                    age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
-
-                    notif_text = (
-                        f"🚨 *ATM Incident Alert* 🚨\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"📄 *ID:* `{case_id}`\n"
-                        f"🏦 *Bank:* {case['bank']}\n"
-                        f"🏢 *Branch:* {case['branch']}\n"
-                        f"⚠️ *Issue:* {case['issue']}\n"
-                        f"📍 *District:* {case['district']}\n"
-                        f"💬 *Comment:* {case['comment']}\n"
-                        f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📌 _Status: Pending Action / Unresolved_"
-                    )
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
-                    
-                    if NOTIFICATION_CHAT_ID:
-                        try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                        except Exception: pass
-
-                    for user_id in list(ACTIVE_USERS_TRACKER):
-                        try: await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                        except Exception: pass
-                    continue
-
-                time_elapsed = now - case_time
-                if time_elapsed >= timedelta(hours=5):
-                    last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
-                    if last_reminder is None or (now - last_reminder) >= timedelta(hours=5):
-                        SENT_REMINDERS_TRACKER[case_id] = now
-                        hours_passed = int(time_elapsed.total_seconds() // 3600)
-                        
-                        reminder_text = (
-                            f"⚠️ *OVERDUE INCIDENT REMINDER (>{hours_passed} Hours)* ⚠️\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"ይህ ኬስ ከተመዘገበ {hours_passed} ሰዓታት አልፈውታል። ፍተሻ ያድርጉ።\n\n"
-                            f"📄 *ID:* `{case_id}`\n"
-                            f"🏦 *Bank:* {case['bank']} ({case['branch']})\n"
-                            f"⚠️ *Issue:* {case['issue']}\n"
-                            f"👤 *Technician:* {case['technician']}\n"
-                            f"🕒 *Reported at:* {case['date_raw']}\n\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"⏳ _Duration: Still Pending!_"
-                        )
-                        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
-                        
-                        if NOTIFICATION_CHAT_ID:
-                            try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                            except Exception: pass
-                        for user_id in list(ACTIVE_USERS_TRACKER):
-                            try: await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                            except Exception: pass
+            if not MAINTENANCE_MODE:
+                await check_and_alert_cases(bot)
         except Exception as e:
             logger.error(f"Error inside independent background loop: {str(e)}")
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)
 
 def get_maintenance_message():
     return (
         "🚨 *SYSTEM NOTICE / MAINTENANCE ALERT* 🚨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚠️ *For All bot user !!!*\n"
-        "The bot was under maintenance and we working on to getback to work please be patient 🙏 🙏🙏 Thank you for understanding us \n\n"
+        "⚠️ *For All bot users!!!*\n"
+        "The bot is currently under maintenance. We are performing system optimizations. Please be patient 🙏 Thank you for understanding.\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🛠️ _Status: Upgrading systems & optimization ongoing_"
     )
@@ -462,7 +471,7 @@ def format_technician_weekly_report(cases, selected_tech):
         line = f"{idx}. ID: {c['case_id']}\n🏦 Bank: {c['bank']} ({c['branch']} branch)\n⚠️ Issue: {c['issue']}\n📅 Date: {date_formatted}\n📌 Status: {status_emoji}\n----------------------------------------"
         report_lines.append(line)
 
-    report_lines.append("\n        *Generally*")
+    report_lines.append("\n        *Summary Overview*")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
@@ -471,7 +480,7 @@ def format_technician_weekly_report(cases, selected_tech):
         else: bank_analytics[b_name]["ongoing"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        report_lines.append(f"*{bank_name} bank*\n    Completed-{stats['completed']}\n    On going-{stats['ongoing']}")
+        report_lines.append(f"*{bank_name} Bank*\n    Completed: {stats['completed']}\n    On going: {stats['ongoing']}")
     return "\n".join(report_lines)
 
 def format_weekly_summary_matrix(cases):
@@ -499,9 +508,9 @@ def format_weekly_summary_matrix(cases):
 
     for tech in ALLOWED_TECHNICIANS:
         stats = tech_stats[tech]
-        report_lines.append(f" 👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
+        report_lines.append(f" 👤 Technician *{tech}*: {stats['completed']} completed, {stats['ongoing']} ongoing.\n")
 
-    report_lines.append(f"\n 🟧 Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
+    report_lines.append(f"\n 🟧 Total in *Adama District*: {total_completed} completed, {total_ongoing} ongoing cases.")
     if other_district_or_unassigned > 0: report_lines.append(f" 🔍 Unassigned / Other District Cases: *{other_district_or_unassigned}*")
     total_cases = total_completed + total_ongoing
     if total_cases > 0: report_lines.append(f"🎯 Completion Rate: *{(total_completed / total_cases) * 100:.1f}%*")
@@ -563,9 +572,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /daily - View daily report by technician selection\n"
         "• /report - View weekly performance metrics by technician\n"
         "• /summary - View overall weekly matrix summary\n"
-        "• /export - Download structured incident Excel spreadsheets"
+        "• /export - Download structured incident Excel spreadsheets\n\n"
+        "🔄 _Checking for live pending cases now..._"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    
+    # Instant execution of background scan targeting this user specifically
+    await check_and_alert_cases(context.bot, target_user_id=chat_id)
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
@@ -640,7 +653,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
-        confirm_text = f"      🔥 *Daily Report*\n\nℹ️ For Dashboard case select Dashboard button \n\n  ℹ️ For Telegram case and PM select Telegram & PM button\n\n"
+        confirm_text = f"      🔥 *Daily Report Menu*\n\nℹ️ For Dashboard cases, select the Dashboard button.\n\n  ℹ️ For Telegram cases and PM, select the Telegram & PM button.\n\n"
         confirm_keyboard = [
             [InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
              InlineKeyboardButton("Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")],
@@ -651,7 +664,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
-        tgpm_text = f"     *Telegram and PM report* \n\n ℹ️ For Telegram registered case clicked  *CASE* button\n \n ℹ️ For PM report Clicked *PM* button \n\n"
+        tgpm_text = f"     *Telegram and PM Report* \n\n ℹ️ For Telegram registered cases, click the *CASE* button.\n \n ℹ️ For PM reports, click the *PM* button. \n\n"
         tgpm_keyboard = [
             [InlineKeyboardButton("CASE", callback_data=f"drpt_case_{tech_name}"),
              InlineKeyboardButton("PM", callback_data=f"drpt_pm_{tech_name}")],
@@ -660,7 +673,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
-    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
@@ -680,10 +692,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 5. 🛠️ CASE SELECTED FROM DASHBOARD
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
-        await query.edit_message_text("⏳ Extraction data for Google form mapping...")
+        await query.edit_message_text("⏳ Extracting data for Google Form mapping...")
         cases, status = await scrape_website_cases()
         if status != "OK": return await query.edit_message_text(f"❌ Sync Fail: {status}")
         
@@ -713,26 +724,29 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("PM Not Done", callback_data="fpm_Not_Done")],
             [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
-        await context.bot.send_message(chat_id=chat_id, text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\nየዳሽቦርድ መረጃዎች ተነበዋል። እባክዎ የቀሩትን መረጃዎች ይሙሉ፦\n\n*1. PM ተደርጓል?*", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\nDashboard logs processed. Please answer configuration variables:\n\n*1. Was PM performed?*", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="Markdown")
         await query.message.delete()
         return
 
-    # 6. HANDLING PM SELECTION
     if data.startswith("fpm_"):
         pm_value = data.split("_")[1] if len(data.split("_")) == 2 else f"{data.split('_')[1]} {data.split('_')[2]}"
         if chat_id not in USER_FORM_STATES:
-            return await context.bot.send_message(chat_id=chat_id, text="❌ የፎርም መሙላት ሂደቱ ጊዜ አልፎበታል፣ እባክዎ እንደገና ይጀምሩ።")
+            return await context.bot.send_message(chat_id=chat_id, text="❌ The configuration session expired, please try again.")
         
         USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") 
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
         kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-        # አስተማማኝ ፅሁፍ ማሳያ
-        await context.bot.send_message(chat_id=chat_id, text="🔧 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        # Fixed: Text message instructions assigned directly to send_message text
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="🔧 *2. Resolution Description:*\n\nPlease type and reply with the technical operations performed to resolve this case.", 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode="Markdown"
+        )
+        await query.message.delete()
         return
 
-    # 7. PRE-SUBMIT PREVIEW
     if data == "f_trigger_preview":
         if chat_id not in USER_FORM_STATES: return
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
@@ -752,7 +766,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
             f"💬 Comment: {payload.get('entry.38555627')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"እባክዎ መረጃውን አረጋግጠው 'Submit Form' የሚለውን ይጫኑ።"
+            f"Please verify the details above and click 'Submit Form' to process configuration."
         )
         final_kb = [
             [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
@@ -761,7 +775,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="Markdown")
         return
 
-    # 8. POST TO GOOGLE FORM
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Sending comprehensive data bundle to Google Forms...")
@@ -838,7 +851,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if state_data['step'] == 'WAITING_FOR_RESOLUTION':
         resolution_text = update.message.text
         if not resolution_text or resolution_text.strip() == "":
-            await update.message.reply_text("❌ እባክዎ ትክክለኛ የፅሁፍ መግለጫ ያስገቡ።")
+            await update.message.reply_text("❌ Input validation error: Please enter a valid text description.")
             return
             
         state_data['extracted_payload']['entry.245892019'] = resolution_text 
@@ -848,7 +861,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🔎 View Summary & Submit", callback_data="f_trigger_preview")],
             [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
         ]
-        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* እባክዎ ከታች ያለውን ማረጋገጫ በተን ይጫኑ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text("✅ *Form parameters gathered successfully!* Click the button below to preview and submit.", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
 
 # ==========================================
 # 11. STARTUP MENU INITIALIZER
