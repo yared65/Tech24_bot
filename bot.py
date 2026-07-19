@@ -315,6 +315,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
         mins_ago = int((time_diff.total_seconds() % 3600) // 60)
         age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
 
+        # 🛠️ ማሻሻያ 1፦ Technician እና Phone በመደበኛው አላርም መልዕክት ውስጥ እንዲካተት ተደርጓል
         notif_text = (
             f"🚨 *ATM Incident Alert* 🚨\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -323,6 +324,8 @@ async def check_and_alert_cases(bot, target_user_id=None):
             f"🏢 *Branch:* {case['branch']}\n"
             f"⚠️ *Issue:* {case['issue']}\n"
             f"📍 *District:* {case['district']}\n"
+            f"👤 *Technician:* {case['technician']}\n"
+            f"📞 *Phone:* {case['tech_phone']}\n"
             f"💬 *Comment:* {case['comment']}\n"
             f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -360,6 +363,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
             continue
 
         # 3. ከአምስት ሰዓት በላይ ለቆዩ ኬዞች አስታዋሽ (Overdue Escalation - Every 5 Hours)
+        # 🛠️ ማሻሻያ 2፦ እያንዳንዱ የትርፍ ሰዓት (Overdue) መልዕክት በተናጠል try-except ውስጥ ሆኗል፣ አንዱ ቢሳሳት ሌላው አይቋረጥም
         time_elapsed = now - case_time
         if time_elapsed >= timedelta(hours=5):
             last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -384,15 +388,15 @@ async def check_and_alert_cases(bot, target_user_id=None):
                 if NOTIFICATION_CHAT_ID:
                     try: 
                         await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                    except Exception: 
-                        pass
+                    except Exception as e: 
+                        logger.error(f"Failed to send overdue reminder to NOTIFICATION_CHAT_ID: {str(e)}")
                 
                 # ለሁሉም ንቁ ተጠቃሚዎች ማስታወሻ መላክ
                 for user_id in list(ACTIVE_USERS_TRACKER):
                     try: 
                         await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                    except Exception: 
-                        pass
+                    except Exception as e: 
+                        logger.warning(f"Failed to send overdue reminder to individual user {user_id}: {str(e)}")
 
 async def start_independent_alarm_loop(bot):
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
@@ -862,7 +866,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         target = next((c for c in cases if c['case_id'] == case_id), None)
         if not target: return await query.edit_message_text("❌ Record lost or finalized.")
         text, kb = build_case_detail_ui(target)
-        await query.edit_message_text(text, reply_markup=kb)
+        await query.edit_message_text(text, kb)
 
 # ==========================================
 # 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
