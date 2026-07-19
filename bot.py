@@ -33,8 +33,8 @@ MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
-     "Girmaye Kelil","Israel Aklilu",
-    "Yared Girma","Yohanis Getiye",
+     "Girmaye Kelil", "Israel Aklilu",
+     "Yared Girma", "Yohanis Getiye",
 ]
 
 FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse"
@@ -47,7 +47,7 @@ if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
     try: NOTIFICATION_CHAT_ID = int(raw_chat_id)
     except ValueError: NOTIFICATION_CHAT_ID = raw_chat_id
 else:
-    NOTIFICATION_CHAT_ID = raw_chat_id
+    NOTIFICATION_CHAT_ID = raw_chat_id if raw_chat_id else None
 
 SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
@@ -119,6 +119,7 @@ def clean_extracted_value(data, key_hierarchy):
     return ""
 
 def get_relative_time(date_obj):
+    if not date_obj: return "Just now", "Just now"
     now = get_eat_now()
     diff = now - date_obj
     seconds = diff.total_seconds()
@@ -135,7 +136,7 @@ def get_relative_time(date_obj):
     return time_str, time_str
 
 def find_matching_technician(dashboard_tech_name):
-    if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-"]:
+    if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-", "null"]:
         return None
     dash_clean = " ".join(str(dashboard_tech_name).strip().split()).lower()
     for tech in ALLOWED_TECHNICIANS:
@@ -230,7 +231,7 @@ async def scrape_website_cases():
                         "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y %H:%M",
                         "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"
                     )
-                    clean_time_str = date_str.split(".")[0]
+                    clean_time_str = date_str.split(".")[0].replace("T", " ")
                     for fmt in formats_to_try:
                         try:
                             date_obj = datetime.strptime(clean_time_str, fmt).replace(tzinfo=None)
@@ -249,7 +250,7 @@ async def scrape_website_cases():
 
                 closed_date, closed_time = ("-", "-")
                 if closed_at_raw and " " in str(closed_at_raw):
-                    c_str = str(closed_at_raw).split(".")[0]
+                    c_str = str(closed_at_raw).split(".")[0].replace("T", " ")
                     closed_date, closed_time = c_str.split(" ")[0], c_str.split(" ")[1][:5]
 
                 status_raw = str(entry.get('callentry_status', '')).lower()
@@ -292,7 +293,7 @@ async def terminate_case_on_dashboard(case_id):
         return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC ALARM & OVERDUE LOOP
+# 5. AUTOMATIC ALARM & OVERDUE LOOP (UPDATED)
 # ==========================================
 async def check_and_alert_cases(bot, target_user_id=None):
     """Core function to broadcast or directly alert pending cases instantly."""
@@ -302,12 +303,12 @@ async def check_and_alert_cases(bot, target_user_id=None):
         return
 
     pending_statuses = ["on going", "pending", "open", "0"]
-    pending_cases = [c for c in cases if str(c['status']).lower() in pending_statuses or c['status'] == "On going"]
+    pending_cases = [c for c in cases if str(c.get('status', '')).lower() in pending_statuses or c.get('status') == "On going"]
     now = get_eat_now()
 
     for case in pending_cases:
         case_id = case['case_id']
-        case_time = case['date_obj']
+        case_time = case.get('date_obj', now)
 
         time_diff = now - case_time
         hours_ago = int(time_diff.total_seconds() // 3600)
@@ -329,7 +330,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
         
-        # If triggered by a specific user doing /start, send to them directly regardless of tracker
+        # 1. ለተወሰነ ተጠቃሚ (Direct /start Command Trigger) በቀጥታ መላክ
         if target_user_id:
             try:
                 await bot.send_message(chat_id=target_user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
@@ -339,20 +340,26 @@ async def check_and_alert_cases(bot, target_user_id=None):
                 SENT_CASES_TRACKER.add(case_id)
             continue
 
-        # Regular Background Tracker Loop
+        # 2. መደበኛ አዲስ ኬዝ ማሳወቂያ (Background Loop Tracker)
         if case_id not in SENT_CASES_TRACKER:
             SENT_CASES_TRACKER.add(case_id)
             
+            # ግሩፕ/ቻናል ካለ ወደ እሱ ይልካል (ባይኖርም ኮዱ አይቋረጥም)
             if NOTIFICATION_CHAT_ID:
-                try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                except Exception: pass
+                try: 
+                    await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"Could not send to NOTIFICATION_CHAT_ID: {str(e)}")
 
+            # ለሁሉም ንቁ ተጠቃሚዎች በግል ይልካል
             for user_id in list(ACTIVE_USERS_TRACKER):
-                try: await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                except Exception: pass
+                try: 
+                    await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                except Exception: 
+                    pass
             continue
 
-        # Overdue escalation tracker (Every 5 Hours)
+        # 3. ከአምስት ሰዓት በላይ ለቆዩ ኬዞች አስታዋሽ (Overdue Escalation - Every 5 Hours)
         time_elapsed = now - case_time
         if time_elapsed >= timedelta(hours=5):
             last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -373,12 +380,19 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     f"⏳ _Duration: Still Pending!_"
                 )
                 
+                # ወደ ዋናው ግሩፕ/ቻናል መላክ
                 if NOTIFICATION_CHAT_ID:
-                    try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                    except Exception: pass
+                    try: 
+                        await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                    except Exception: 
+                        pass
+                
+                # ለሁሉም ንቁ ተጠቃሚዎች ማስታወሻ መላክ
                 for user_id in list(ACTIVE_USERS_TRACKER):
-                    try: await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
-                    except Exception: pass
+                    try: 
+                        await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                    except Exception: 
+                        pass
 
 async def start_independent_alarm_loop(bot):
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
@@ -401,7 +415,7 @@ def get_maintenance_message():
     )
 
 def build_case_detail_ui(case):
-    relative_long, _ = get_relative_time(case['date_obj'])
+    relative_long, _ = get_relative_time(case.get('date_obj'))
     text = (
         f"Case ID: {case['case_id']}\n"
         f"Terminal: {case['terminal']}\n"
@@ -412,7 +426,7 @@ def build_case_detail_ui(case):
         f"District: {case['district']}\n"
         f"Comment: {case['comment']}\n"
         f"Technician: {case['technician']}\n"
-        f"Reported At: {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S')} (EAT)\n"
+        f"Reported At: {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S') if case.get('date_obj') else case['date_raw']} (EAT)\n"
         f"Relative Time: {relative_long}"
     )
     keyboard = [
@@ -430,7 +444,7 @@ def format_technician_daily_report(cases, selected_tech, report_type):
     today_str = now.strftime("%d/%m/%Y")
     filtered_cases = []
     for c in cases:
-        if c['date_obj'].strftime("%d/%m/%Y") == today_str:
+        if c.get('date_obj') and c['date_obj'].strftime("%d/%m/%Y") == today_str:
             matched_tech = find_matching_technician(c['technician'])
             if matched_tech and matched_tech.lower() == selected_tech.lower():
                 filtered_cases.append(c)
@@ -458,7 +472,7 @@ def format_technician_weekly_report(cases, selected_tech):
 
     filtered_cases = []
     for c in cases:
-        if start_of_week <= c['date_obj'] <= end_of_week:
+        if c.get('date_obj') and (start_of_week <= c['date_obj'] <= end_of_week):
             matched_tech = find_matching_technician(c['technician'])
             if matched_tech and matched_tech.lower() == selected_tech.lower(): filtered_cases.append(c)
 
@@ -489,7 +503,7 @@ def format_weekly_summary_matrix(cases):
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
-    filtered_cases = [c for c in cases if start_of_week <= c['date_obj'] <= end_of_week]
+    filtered_cases = [c for c in cases if c.get('date_obj') and (start_of_week <= c['date_obj'] <= end_of_week)]
     report_lines = ["📋 *Weekly Summary Report of Matrix* 📋\n"]
 
     tech_stats = {tech: {"completed": 0, "ongoing": 0} for tech in ALLOWED_TECHNICIANS}
@@ -584,7 +598,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    except Exception: pass
 
     if status != "OK": return await update.message.reply_text(f"❌ *Connection Failure:*\n{status}", parse_mode="Markdown")
     pending_cases = [c for c in cases if c['status'] == "On going"]
@@ -596,7 +612,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=kb)
     else:
         text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details."
-        keyboard = [[InlineKeyboardButton(f"{get_relative_time(c['date_obj'])[1]} | {c['case_id']} | {c['bank']} | {c['branch']}", callback_data=f"view_{c['case_id']}")] for c in pending_cases]
+        keyboard = [[InlineKeyboardButton(f"{get_relative_time(c.get('date_obj'))[1]} | {c['case_id']} | {c['bank']} | {c['branch']}", callback_data=f"view_{c['case_id']}")] for c in pending_cases]
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -616,7 +632,9 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    except Exception: pass
     if status != "OK": return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
     await update.message.reply_text(format_weekly_summary_matrix(cases), parse_mode="Markdown")
 
@@ -624,7 +642,9 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Writing and formatting Excel spreadsheet...")
     cases, status = await scrape_website_cases()
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
+    except Exception: pass
 
     if status != "OK": return await update.message.reply_text(f"❌ *Export Blocked:* {status}", parse_mode="Markdown")
     if not cases: return await update.message.reply_text("❌ *Export Cancelled:* No cases matched query scope.", parse_mode="Markdown")
@@ -648,7 +668,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
     if data == "cancel_action":
         USER_FORM_STATES.pop(chat_id, None)
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception: pass
         return
 
     if data.startswith("dtech_"):
@@ -681,7 +703,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return await query.edit_message_text(f"❌ API Sync Fail: {status}")
 
         today_str = get_eat_now().strftime("%d/%m/%Y")
-        filtered_cases = [c for c in cases if c['date_obj'].strftime("%d/%m/%Y") == today_str and find_matching_technician(c['technician']) and find_matching_technician(c['technician']).lower() == tech_name.lower()]
+        filtered_cases = [c for c in cases if c.get('date_obj') and c['date_obj'].strftime("%d/%m/%Y") == today_str and find_matching_technician(c['technician']) and find_matching_technician(c['technician']).lower() == tech_name.lower()]
 
         if not filtered_cases:
             return await query.edit_message_text(text=f"📭 *No dashboard cases found for {tech_name} today ({today_str}).*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]], parse_mode="Markdown"))
@@ -725,7 +747,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
         await context.bot.send_message(chat_id=chat_id, text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\nDashboard logs processed. Please answer configuration variables:\n\n*1. Was PM performed?*", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="Markdown")
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception: pass
         return
 
     if data.startswith("fpm_"):
@@ -737,14 +761,15 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
         kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
-        # Fixed: Text message instructions assigned directly to send_message text
         await context.bot.send_message(
             chat_id=chat_id, 
             text="🔧 *2. Resolution Description:*\n\nPlease type and reply with the technical operations performed to resolve this case.", 
             reply_markup=InlineKeyboardMarkup(kb), 
             parse_mode="Markdown"
         )
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception: pass
         return
 
     if data == "f_trigger_preview":
