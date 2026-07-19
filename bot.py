@@ -34,7 +34,7 @@ MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS (Isael እና Israel ሁለቱም ተካተዋል እንዳያመልጥ)
 ALLOWED_TECHNICIANS = [
-     "Girmaye Kelil", "Isael Aklilu", "Israel Aklilu",
+     "Girmaye Kelil","Israel Aklilu",
     "Yared Girma", "Yohanis Getiye",
 ]
 
