@@ -37,7 +37,7 @@ ALLOWED_TECHNICIANS = [
     "Yared Girma", "Yeshurun Asefa", "Yohanis Getiye", "Yonael Daniel"
 ]
 
-# የጉግል ፎርም ማስገቢያ ሊንክ (formResponse መሆን አለበት)
+# የጉግል ፎርም ማስገቢያ ሊንክ
 FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse"
 
 def get_eat_now():
@@ -54,7 +54,7 @@ SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
 ACTIVE_USERS_TRACKER = set()
 
-# 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ (Form State Tracker)
+# 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ
 USER_FORM_STATES = {}
 
 # ==========================================
@@ -128,7 +128,7 @@ def find_matching_technician(dashboard_tech_name):
     return None
 
 # ==========================================
-# 4. API SCRAPER & TRANSACTION ENGINES
+# 4. API SCRAPER (ቀን እና ሰዓትን ጨምሮ)
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -214,10 +214,7 @@ async def scrape_website_cases():
                     if not tech_phone: tech_phone = "-"
 
                     created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                    if not created_at:
-                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
-                        if isinstance(tech_folder, dict):
-                            created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
+                    closed_at_raw = entry.get('closed_at') or entry.get('updated_at') or ""
 
                     date_obj = None
                     if created_at:
@@ -239,12 +236,17 @@ async def scrape_website_cases():
                     else:
                         date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
 
-                    status_raw = str(entry.get('callentry_status', '')).lower()
-                    if not status_raw:
-                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
-                        if isinstance(tech_folder, dict):
-                            status_raw = str(tech_folder.get('callentry_status', '')).lower()
+                    # 🕒 ቀናትን እና ሰዓታትን መከፋፈያ መስመር
+                    reg_date, reg_time = ("-", "-")
+                    if date_str and " " in date_str:
+                        reg_date, reg_time = date_str.split(" ")[0], date_str.split(" ")[1][:5]
 
+                    closed_date, closed_time = ("-", "-")
+                    if closed_at_raw and " " in str(closed_at_raw):
+                        c_str = str(closed_at_raw).split(".")[0]
+                        closed_date, closed_time = c_str.split(" ")[0], c_str.split(" ")[1][:5]
+
+                    status_raw = str(entry.get('callentry_status', '')).lower()
                     if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
                     else: status_text = "On going"
 
@@ -252,7 +254,9 @@ async def scrape_website_cases():
                         'case_id': case_id, 'bank': bank, 'district': district, 'branch': branch,
                         'terminal': terminal_no, 'atm_name': terminal_name, 'issue': issue,
                         'status': status_text, 'comment': comment, 'technician': technician,
-                        'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj
+                        'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj,
+                        'reg_date': reg_date, 'reg_time': reg_time,
+                        'closed_date': closed_date, 'closed_time': closed_time
                     })
             return scraped_cases, "OK"
         except Exception as e:
@@ -672,7 +676,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 5. 🛠️ CASE SELECTED FROM DASHBOARD -> TRIGGERS REMAINING FORM INPUTS
+    # 5. 🛠️ CASE SELECTED FROM DASHBOARD -> AUTOFILLS EXTRANEOUS FIELDS
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extraction data for Google form mapping...")
@@ -682,7 +686,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         target_case = next((c for c in cases if c['case_id'] == case_id), None)
         if not target_case: return await query.edit_message_text("❌ Selected record could not be found.")
 
-        # የጉግል ፎርሙን entry መለያዎች እዚህ ላይ ያከማቻል
+        # 🚨 ማሳሰቢያ፦ ቀናትና ሰዓቶች ከላይ ካለው Scraper ተወስደው እዚህ ላይ አብረው እንዲሞሉ ተደርጓል!
         USER_FORM_STATES[chat_id] = {
             'step': 'ASK_PM_TYPE',
             'tech_name': target_case['technician'],
@@ -694,6 +698,10 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 'entry.1741675200': target_case['issue'],          # Issue Description
                 'entry.1994644026': target_case['status'],         # Status
                 'entry.38555627': target_case['comment'],          # Comment
+                'entry.regdate': target_case['reg_date'],          # Registered Date (Autofilled)
+                'entry.regtime': target_case['reg_time'],          # Registered Time (Autofilled)
+                'entry.clsdate': target_case['closed_date'],       # Closed Date (Autofilled)
+                'entry.clstime': target_case['closed_time']        # Closed Time (Autofilled)
             }
         }
         
@@ -715,9 +723,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") 
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
-        # የባክ በተን እና መግለጫ
         kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
-        await query.edit_message_text(text="编 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="🔧 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
     # 7. PRE-SUBMIT PREVIEW SHOWING ALL FIELDS WITH BACK & SUBMIT ACTIONS
@@ -734,6 +741,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🏢 Branch: {payload.get('entry.1983056024')}\n"
             f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
             f"📌 Status: {payload.get('entry.1994644026')}\n"
+            f"🕒 Registered: {payload.get('entry.regdate', '-')} - {payload.get('entry.regtime', '-')}\n"
+            f"⏳ Closed: {payload.get('entry.clsdate', '-')} - {payload.get('entry.clstime', '-')}\n"
             f"🔧 PM Status: {payload.get('entry.1011663080')}\n"
             f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
             f"💬 Comment: {payload.get('entry.38555627')}\n"
