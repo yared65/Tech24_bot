@@ -325,7 +325,6 @@ async def check_and_alert_cases(bot, target_user_id=None):
             f"⚠️ *Issue:* {case['issue']}\n"
             f"📍 *District:* {case['district']}\n"
             f"👤 *Technician:* {case['technician']}\n"
-            f"📞 *Phone:* {case['tech_phone']}\n"
             f"💬 *Comment:* {case['comment']}\n"
             f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
