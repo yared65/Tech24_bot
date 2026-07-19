@@ -640,7 +640,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
-        confirm_text = f"🔥 *Daily Report*\n\n For Dashboard case select Dashboard button \n For Telegram case and PM select Telegram & PM button"
+        confirm_text = f"   🔥 *Daily Report*\n\nℹ️ For Dashboard case select Dashboard button \n\n  ℹ️ For Telegram case and PM select Telegram & PM button"\n\n
         confirm_keyboard = [
             [InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
              InlineKeyboardButton("Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")],
@@ -651,7 +651,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
-        tgpm_text = f" Telegram and PM report \n\nFor Telegram registered case clicked  *CASE* button  \nFor PM report Clicked *PM* button"
+        tgpm_text = f" Telegram and PM report \n\n ℹ️ For Telegram registered case clicked  *CASE* button\n \n ℹ️ For PM report Clicked *PM* button"\n\n
         tgpm_keyboard = [
             [InlineKeyboardButton("CASE", callback_data=f"drpt_case_{tech_name}"),
              InlineKeyboardButton("PM", callback_data=f"drpt_pm_{tech_name}")],
