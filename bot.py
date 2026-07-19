@@ -32,7 +32,7 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False 
 
-# 🎯 ALLOWED TECHNICIANS (Isael እና Israel ሁለቱም ተካተዋል እንዳያመልጥ)
+# 🎯 ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
      "Girmaye Kelil","Israel Aklilu",
     "Yared Girma", "Yohanis Getiye",
