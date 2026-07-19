@@ -33,8 +33,8 @@ MAINTENANCE_MODE = False
 
 # 🎯 ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
-    "Abel Demeke", "Feab Worku", "Girmaye Kelil", 
-    "Yared Girma", "Yeshurun Asefa", "Yohanis Getiye", "Yonael Daniel"
+     "Girmaye Kelil","Isael Aklilu",
+    "Yared Girma","Yohanis Getiye",
 ]
 
 # የጉግል ፎርም ማስገቢያ ሊንክ
