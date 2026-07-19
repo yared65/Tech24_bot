@@ -4,6 +4,7 @@ import asyncio
 import threading
 import json
 import urllib.parse
+import html
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from flask import Flask
@@ -31,10 +32,10 @@ PASSWORD = os.environ.get("PASSWORD")
 # 🚨 MAINTENANCE SWITCH
 MAINTENANCE_MODE = False 
 
-# 🎯 ALLOWED TECHNICIANS
+# 🎯 ALLOWED TECHNICIANS (Isael እና Israel ሁለቱም ተካተዋል እንዳያመልጥ)
 ALLOWED_TECHNICIANS = [
-     "Girmaye Kelil","Isael Aklilu",
-    "Yared Girma","Yohanis Getiye",
+     "Girmaye Kelil", "Isael Aklilu", "Israel Aklilu",
+    "Yared Girma", "Yohanis Getiye",
 ]
 
 # የጉግል ፎርም ማስገቢያ ሊንክ
@@ -57,7 +58,7 @@ ACTIVE_USERS_TRACKER = set()
 # 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ
 USER_FORM_STATES = {}
 
-# 🌐 GLOBAL HTTP CLIENT (ቦቱ እንዳይቆም/እንዳይዝረከረክ በጋራ የሚሰራ)
+# 🌐 GLOBAL HTTP CLIENT
 HTTP_CLIENT = httpx.AsyncClient(
     headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -67,7 +68,7 @@ HTTP_CLIENT = httpx.AsyncClient(
         'Referer': 'https://tech24et.com/'
     },
     follow_redirects=True,
-    timeout=10.0, # ታይምአውት ወደ 10 ሰከንድ ዝቅ ተደርጓል
+    timeout=10.0,
     verify=False
 )
 
@@ -106,7 +107,6 @@ def clean_extracted_value(data, key_hierarchy):
     parsed_data = safe_parse_json(data) if isinstance(data, str) else data
     if not isinstance(parsed_data, dict): return str(parsed_data)
     
-    # መጀመሪያ ዋናዎቹን የቁልፍ ቅደም ተከተሎች መፈለግ
     for key in key_hierarchy:
         if key in parsed_data and parsed_data[key] is not None:
             val = parsed_data[key]
@@ -114,7 +114,6 @@ def clean_extracted_value(data, key_hierarchy):
                 return clean_extracted_value(val, key_hierarchy)
             return str(val)
             
-    # ማለቂያ የሌለው ሉፕ (Infinite Loop) እንዳይፈጠር ተስተካክሏል
     for key in key_hierarchy:
         for k, v in parsed_data.items():
             if isinstance(v, dict) and key in v:
@@ -295,7 +294,7 @@ async def terminate_case_on_dashboard(case_id):
         return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC ALARM & OVERDUE LOOP
+# 5. AUTOMATIC ALARM & OVERDUE LOOP (HTML Mode & Safe Tracking)
 # ==========================================
 async def start_independent_alarm_loop(bot):
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
@@ -320,75 +319,93 @@ async def start_independent_alarm_loop(bot):
                 case_time = case['date_obj']
 
                 if case_id not in SENT_CASES_TRACKER:
-                    SENT_CASES_TRACKER.add(case_id)
                     time_diff = now - case_time
                     hours_ago = int(time_diff.total_seconds() // 3600)
                     mins_ago = int((time_diff.total_seconds() % 3600) // 60)
                     age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
 
+                    # HTML Parse Mode በመጠቀም ከምልክቶች ነጻ ማድረግ
                     notif_text = (
-                        f"🚨 *ATM Incident Alert* 🚨\n"
+                        f"🚨 <b>ATM Incident Alert</b> 🚨\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"📄 *ID:* `{case_id}`\n"
-                        f"🏦 *Bank:* {case['bank']}\n"
-                        f"🏢 *Branch:* {case['branch']}\n"
-                        f"⚠️ *Issue:* {case['issue']}\n"
-                        f"📍 *District:* {case['district']}\n"
-                        f"💬 *Comment:* {case['comment']}\n"
-                        f"🕒 *Reported at:* {case['date_raw']} ({age_str})\n\n"
+                        f"📄 <b>ID:</b> <code>{html.escape(case_id)}</code>\n"
+                        f"🏦 <b>Bank:</b> {html.escape(case['bank'])}\n"
+                        f"🏢 <b>Branch:</b> {html.escape(case['branch'])}\n"
+                        f"⚠️ <b>Issue:</b> {html.escape(case['issue'])}\n"
+                        f"📍 <b>District:</b> {html.escape(case['district'])}\n"
+                        f"💬 <b>Comment:</b> {html.escape(case['comment'])}\n"
+                        f"🕒 <b>Reported at:</b> {html.escape(case['date_raw'])} ({age_str})\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📌 _Status: Pending Action / Unresolved_"
+                        f"📌 <i>Status: Pending Action / Unresolved</i>"
                     )
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                     
+                    message_sent_successfully = False
                     if NOTIFICATION_CHAT_ID:
-                        try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                        except Exception: pass
+                        try: 
+                            await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="HTML")
+                            message_sent_successfully = True
+                        except Exception as e:
+                            logger.error(f"Failed sending alert to group: {e}")
 
                     for user_id in list(ACTIVE_USERS_TRACKER):
-                        try: await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                        except Exception: pass
+                        try: 
+                            await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="HTML")
+                            message_sent_successfully = True
+                        except Exception: 
+                            pass
+                    
+                    # መልዕክቱ በትክክል ከሄደ በኋላ ብቻ ትራከሩ ላይ መመዝገብ አለበት
+                    if message_sent_successfully:
+                        SENT_CASES_TRACKER.add(case_id)
                     continue
 
                 time_elapsed = now - case_time
                 if time_elapsed >= timedelta(hours=5):
                     last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
                     if last_reminder is None or (now - last_reminder) >= timedelta(hours=5):
-                        SENT_REMINDERS_TRACKER[case_id] = now
                         hours_passed = int(time_elapsed.total_seconds() // 3600)
                         
                         reminder_text = (
-                            f"⚠️ *OVERDUE INCIDENT REMINDER (>{hours_passed} Hours)* ⚠️\n"
+                            f"⚠️ <b>OVERDUE INCIDENT REMINDER (&gt;{hours_passed} Hours)</b> ⚠️\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"ይህ ኬስ ከተመዘገበ {hours_passed} ሰዓታት አልፈውታል። ፍተሻ ያድርጉ።\n\n"
-                            f"📄 *ID:* `{case_id}`\n"
-                            f"🏦 *Bank:* {case['bank']} ({case['branch']})\n"
-                            f"⚠️ *Issue:* {case['issue']}\n"
-                            f"👤 *Technician:* {case['technician']}\n"
-                            f"🕒 *Reported at:* {case['date_raw']}\n\n"
+                            f"📄 <b>ID:</b> <code>{html.escape(case_id)}</code>\n"
+                            f"🏦 <b>Bank:</b> {html.escape(case['bank'])} ({html.escape(case['branch'])})\n"
+                            f"⚠️ <b>Issue:</b> {html.escape(case['issue'])}\n"
+                            f"👤 <b>Technician:</b> {html.escape(case['technician'])}\n"
+                            f"🕒 <b>Reported at:</b> {html.escape(case['date_raw'])}\n\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"⏳ _Duration: Still Pending!_"
+                            f"⏳ <i>Duration: Still Pending!</i>"
                         )
                         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
                         
+                        reminder_sent = False
                         if NOTIFICATION_CHAT_ID:
-                            try: await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                            try: 
+                                await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="HTML")
+                                reminder_sent = True
                             except Exception: pass
                         for user_id in list(ACTIVE_USERS_TRACKER):
-                            try: await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                            try: 
+                                await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="HTML")
+                                reminder_sent = True
                             except Exception: pass
+                            
+                        if reminder_sent:
+                            SENT_REMINDERS_TRACKER[case_id] = now
         except Exception as e:
             logger.error(f"Error inside independent background loop: {str(e)}")
         await asyncio.sleep(30)
 
 def get_maintenance_message():
     return (
-        "🚨 *SYSTEM NOTICE / MAINTENANCE ALERT* 🚨\n"
+        "🚨 <b>SYSTEM NOTICE / MAINTENANCE ALERT</b> 🚨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚠️ *For All bot user !!!*\n"
+        "⚠️ <b>For All bot user !!!</b>\n"
         "The bot was under maintenance and we working on to getback to work please be patient 🙏 🙏🙏 Thank you for understanding us \n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🛠️ _Status: Upgrading systems & optimization ongoing_"
+        "🛠️ <i>Status: Upgrading systems & optimization ongoing</i>"
     )
 
 def build_case_detail_ui(case):
@@ -429,12 +446,12 @@ def format_technician_daily_report(cases, selected_tech, report_type):
     title_type = "Telegram Registered Cases" if report_type == "case" else "PM Report" if report_type == "pm" else "Dashboard Cases"
     if not filtered_cases:
         return (
-            f"📋 *Adama District Daily Report ({title_type}) - {selected_tech}* 📋\n"
+            f"📋 <b>Adama District Daily Report ({title_type}) - {selected_tech}</b> 📋\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📭 *Currently, there are no recorded cases for this technician today ({today_str}).*\n\n"
+            f"📭 <b>Currently, there are no recorded cases for this technician today ({today_str}).</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
-    report_lines = [f"📋 *Adama District Daily Report ({title_type}) - {selected_tech}* 📋\n", f"📅 Date: {today_str}\n━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    report_lines = [f"📋 <b>Adama District Daily Report ({title_type}) - {selected_tech}</b> 📋\n", f"📅 Date: {today_str}\n━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for idx, c in enumerate(filtered_cases, start=1):
         status_emoji = "✅ Completed" if c['status'] == "Completed" else "⏳ On going"
         line = f"{idx}. ID: {c['case_id']}\n🏦 Bank: {c['bank']} ({c['branch']} branch)\n⚠️ Issue: {c['issue']}\n📌 Status: {status_emoji}\n💬 Comment: {c['comment']}\n----------------------------------------"
@@ -454,15 +471,15 @@ def format_technician_weekly_report(cases, selected_tech):
             if matched_tech and matched_tech.lower() == selected_tech.lower(): filtered_cases.append(c)
 
     if not filtered_cases:
-        return f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📭 *Currently, there are no recorded cases assigned to this technician for this week.*\n\n🌟 Keep up the great work!\n━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
+        return f"📋 <b>Adama District Weekly Cases Report - {selected_tech}</b> 📋\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📭 <b>Currently, there are no recorded cases assigned to this technician for this week.</b>\n\n🌟 Keep up the great work!\n━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    report_lines = [f"📋 <b>Adama District Weekly Cases Report - {selected_tech}</b> 📋\n"]
     for idx, c in enumerate(filtered_cases, start=1):
         date_formatted = c['date_obj'].strftime("%d/%m/%Y")
         status_emoji = "✅ Completed" if c['status'] == "Completed" else "⏳ On going"
         line = f"{idx}. ID: {c['case_id']}\n🏦 Bank: {c['bank']} ({c['branch']} branch)\n⚠️ Issue: {c['issue']}\n📅 Date: {date_formatted}\n📌 Status: {status_emoji}\n----------------------------------------"
         report_lines.append(line)
 
-    report_lines.append("\n        *Generally*")
+    report_lines.append("\n        <b>Generally</b>")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
@@ -471,7 +488,7 @@ def format_technician_weekly_report(cases, selected_tech):
         else: bank_analytics[b_name]["ongoing"] += 1
 
     for bank_name, stats in bank_analytics.items():
-        report_lines.append(f"*{bank_name} bank*\n    Completed-{stats['completed']}\n    On going-{stats['ongoing']}")
+        report_lines.append(f"<b>{bank_name} bank</b>\n    Completed-{stats['completed']}\n    On going-{stats['ongoing']}")
     return "\n".join(report_lines)
 
 def format_weekly_summary_matrix(cases):
@@ -481,7 +498,7 @@ def format_weekly_summary_matrix(cases):
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
     filtered_cases = [c for c in cases if start_of_week <= c['date_obj'] <= end_of_week]
-    report_lines = ["📋 *Weekly Summary Report of Matrix* 📋\n"]
+    report_lines = ["📋 <b>Weekly Summary Report of Matrix</b> 📋\n"]
 
     tech_stats = {tech: {"completed": 0, "ongoing": 0} for tech in ALLOWED_TECHNICIANS}
     total_completed, total_ongoing, other_district_or_unassigned = 0, 0, 0
@@ -499,14 +516,14 @@ def format_weekly_summary_matrix(cases):
 
     for tech in ALLOWED_TECHNICIANS:
         stats = tech_stats[tech]
-        report_lines.append(f" 👤 Technician *{tech}* {stats['completed']} case completed {stats['ongoing']} on going.\n")
+        report_lines.append(f" 👤 Technician <b>{tech}</b> {stats['completed']} case completed {stats['ongoing']} on going.\n")
 
-    report_lines.append(f"\n 🟧 Totally in *Adama District* {total_completed} completed {total_ongoing} on going cases.")
-    if other_district_or_unassigned > 0: report_lines.append(f" 🔍 Unassigned / Other District Cases: *{other_district_or_unassigned}*")
+    report_lines.append(f"\n 🟧 Totally in <b>Adama District</b> {total_completed} completed {total_ongoing} on going cases.")
+    if other_district_or_unassigned > 0: report_lines.append(f" 🔍 Unassigned / Other District Cases: <b>{other_district_or_unassigned}</b>")
     total_cases = total_completed + total_ongoing
-    if total_cases > 0: report_lines.append(f"🎯 Completion Rate: *{(total_completed / total_cases) * 100:.1f}%*")
+    if total_cases > 0: report_lines.append(f"🎯 Completion Rate: <b>{(total_completed / total_cases) * 100:.1f}%</b>")
     num_techs = len(ALLOWED_TECHNICIANS)
-    if num_techs > 0: report_lines.append(f"📊 Average Completed cases per Tech: *{total_completed / num_techs:.1f}*")
+    if num_techs > 0: report_lines.append(f"📊 Average Completed cases per Tech: <b>{total_completed / num_techs:.1f}</b>")
     return "\n".join(report_lines)
 
 def generate_excel_bytes(cases):
@@ -552,28 +569,28 @@ def generate_excel_bytes(cases):
 # 8. TELEGRAM COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     chat_id = update.effective_chat.id
     ACTIVE_USERS_TRACKER.add(chat_id)
 
     welcome_text = (
-        "👋 *Welcome to Tech24 Adama District Bot*\n\n"
-        "💻 *Available Commands Menu:*\n"
+        "👋 <b>Welcome to Tech24 Adama District Bot</b>\n\n"
+        "💻 <b>Available Commands Menu:</b>\n"
         "• /pending - View currently open / unresolved cases\n"
         "• /daily - View daily report by technician selection\n"
         "• /report - View weekly performance metrics by technician\n"
         "• /summary - View overall weekly matrix summary\n"
         "• /export - Download structured incident Excel spreadsheets"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text, parse_mode="HTML")
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
-    if status != "OK": return await update.message.reply_text(f"❌ *Connection Failure:*\n{status}", parse_mode="Markdown")
+    if status != "OK": return await update.message.reply_text(f"❌ <b>Connection Failure:</b>\n{status}", parse_mode="HTML")
     pending_cases = [c for c in cases if c['status'] == "On going"]
     if not pending_cases:
         return await update.message.reply_text("✅ All Adama cases are completed! No pending cases found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]]))
@@ -588,37 +605,37 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     keyboard = [[InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text("Select an Adama District Technician to view their Daily report:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text("Select an Adama District Technician to view their weekly cases report (Monday - Sunday):", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
-    if status != "OK": return await update.message.reply_text(f"❌ *Error:* {status}", parse_mode="Markdown")
-    await update.message.reply_text(format_weekly_summary_matrix(cases), parse_mode="Markdown")
+    if status != "OK": return await update.message.reply_text(f"❌ <b>Error:</b> {status}", parse_mode="HTML")
+    await update.message.reply_text(format_weekly_summary_matrix(cases), parse_mode="HTML")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="HTML")
     processing = await update.message.reply_text("⏳ Writing and formatting Excel spreadsheet...")
     cases, status = await scrape_website_cases()
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing.message_id)
 
-    if status != "OK": return await update.message.reply_text(f"❌ *Export Blocked:* {status}", parse_mode="Markdown")
-    if not cases: return await update.message.reply_text("❌ *Export Cancelled:* No cases matched query scope.", parse_mode="Markdown")
+    if status != "OK": return await update.message.reply_text(f"❌ <b>Export Blocked:</b> {status}", parse_mode="HTML")
+    if not cases: return await update.message.reply_text("❌ <b>Export Cancelled:</b> No cases matched query scope.", parse_mode="HTML")
 
     excel_file = generate_excel_bytes(cases)
     excel_file.name = f"case-report-{get_eat_now().strftime('%Y-%m')}.xlsx"
-    await context.bot.send_document(chat_id=update.effective_chat.id, document=excel_file, caption=f"📊 *ATM Cases Report – {get_eat_now().strftime('%B %Y')}*\n\nThis report contains all ATM cases.", parse_mode="Markdown")
+    await context.bot.send_document(chat_id=update.effective_chat.id, document=excel_file, caption=f"📊 <b>ATM Cases Report – {get_eat_now().strftime('%B %Y')}</b>\n\nThis report contains all ATM cases.", parse_mode="HTML")
 
 # ==========================================
 # 9. INLINE BUTTON CALLBACK HANDLER
@@ -629,7 +646,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
 
     if MAINTENANCE_MODE:
-        await context.bot.send_message(chat_id=chat_id, text=get_maintenance_message(), parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=get_maintenance_message(), parse_mode="HTML")
         return
 
     data = query.data
@@ -640,27 +657,26 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
-        confirm_text = f"      🔥 *Daily Report*\n\nℹ️ For Dashboard case select Dashboard button \n\n  ℹ️ For Telegram case and PM select Telegram & PM button\n\n"
+        confirm_text = f"      🔥 <b>Daily Report</b>\n\nℹ️ For Dashboard case select Dashboard button \n\n  ℹ️ For Telegram case and PM select Telegram & PM button\n\n"
         confirm_keyboard = [
             [InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
              InlineKeyboardButton("Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")],
             [InlineKeyboardButton("🔙 Back to Technicians", callback_data="back_to_daily_techs")]
         ]
-        await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
+        await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="HTML")
         return
 
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
-        tgpm_text = f"     *Telegram and PM report* \n\n ℹ️ For Telegram registered case clicked  *CASE* button\n \n ℹ️ For PM report Clicked *PM* button \n\n"
+        tgpm_text = f"     <b>Telegram and PM report</b> \n\n ℹ️ For Telegram registered case clicked  <b>CASE</b> button\n \n ℹ️ For PM report Clicked <b>PM</b> button \n\n"
         tgpm_keyboard = [
             [InlineKeyboardButton("CASE", callback_data=f"drpt_case_{tech_name}"),
              InlineKeyboardButton("PM", callback_data=f"drpt_pm_{tech_name}")],
             [InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]
         ]
-        await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
+        await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="HTML")
         return
 
-    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
@@ -672,15 +688,14 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         filtered_cases = [c for c in cases if c['date_obj'].strftime("%d/%m/%Y") == today_str and find_matching_technician(c['technician']) and find_matching_technician(c['technician']).lower() == tech_name.lower()]
 
         if not filtered_cases:
-            return await query.edit_message_text(text=f"📭 *No dashboard cases found for {tech_name} today ({today_str}).*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]], parse_mode="Markdown"))
+            return await query.edit_message_text(text=f"📭 <b>No dashboard cases found for {tech_name} today ({today_str}).</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]], parse_mode="HTML"))
 
-        text = f"📋 *Today's Dashboard Cases for {tech_name}:*\nSelect a case to initiate reporting."
+        text = f"📋 <b>Today's Dashboard Cases for {tech_name}:</b>\nSelect a case to initiate reporting."
         keyboard = [[InlineKeyboardButton(f"ID: {c['case_id']} | {c['branch']}", callback_data=f"fcase_{c['case_id']}")] for c in filtered_cases]
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")])
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 5. 🛠️ CASE SELECTED FROM DASHBOARD
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extraction data for Google form mapping...")
@@ -713,11 +728,10 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("PM Not Done", callback_data="fpm_Not_Done")],
             [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
-        await context.bot.send_message(chat_id=chat_id, text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\nየዳሽቦርድ መረጃዎች ተነበዋል። እባክዎ የቀሩትን መረጃዎች ይሙሉ፦\n\n*1. PM ተደርጓል?*", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=f"📊 <b>Form Configurator Loaded for Case {case_id}</b>\n\nየዳሽቦርድ መረጃዎች ተነበዋል። እባክዎ የቀሩትን መረጃዎች ይሙሉ፦\n\n<b>1. PM ተደርጓል?</b>", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="HTML")
         await query.message.delete()
         return
 
-    # 6. HANDLING PM SELECTION
     if data.startswith("fpm_"):
         pm_value = data.split("_")[1] if len(data.split("_")) == 2 else f"{data.split('_')[1]} {data.split('_')[2]}"
         if chat_id not in USER_FORM_STATES:
@@ -727,18 +741,17 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
         kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-        # አስተማማኝ ፅሁፍ ማሳያ
-        await context.bot.send_message(chat_id=chat_id, text="🔧 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        # (ስህተት የነበረው 'text=' እዚህ ጋ ተስተካክሏል)
+        pm_text_info = "🔧 <b>2. የተወሰደው መፍትሄ (Resolution Description):</b>\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።"
+        await query.edit_message_text(text=pm_text_info, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
-    # 7. PRE-SUBMIT PREVIEW
     if data == "f_trigger_preview":
         if chat_id not in USER_FORM_STATES: return
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
         
         preview_msg = (
-            f"📋 *Google Form Data Preview* 📋\n"
+            f"📋 <b>Google Form Data Preview</b> 📋\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🆔 Case ID: {payload.get('entry.283120155')}\n"
             f"🏧 Terminal No: {payload.get('entry.1541091566')}\n"
@@ -752,16 +765,15 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
             f"💬 Comment: {payload.get('entry.38555627')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"እባክዎ መረጃውን አረጋግጠው 'Submit Form' የሚለውን ይጫኑ።"
+            f"እባክዎ መረጃውን አረጋግጠው 'Submit Form' የሚለውን ይጫኑ।"
         )
         final_kb = [
             [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
             [InlineKeyboardButton("❌ Cancel / Abort", callback_data="cancel_action")]
         ]
-        await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="Markdown")
+        await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="HTML")
         return
 
-    # 8. POST TO GOOGLE FORM
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Sending comprehensive data bundle to Google Forms...")
@@ -771,11 +783,11 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(FORM_URL, data=payload)
                 if resp.status_code in [200, 302]:
-                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Dashboard & technician inputs fully synchronized.", parse_mode="Markdown")
+                    await query.edit_message_text("✅ <b>Google Form Successfully Submitted!</b> Dashboard & technician inputs fully synchronized.", parse_mode="HTML")
                 else:
-                    await query.edit_message_text(f"❌ *Submission Failed.* Google form engine returned status code: {resp.status_code}")
+                    await query.edit_message_text(f"❌ <b>Submission Failed.</b> Google form engine returned status code: {resp.status_code}")
         except Exception as e:
-            await query.edit_message_text(f"❌ *Network / Connection Error:* {str(e)}")
+            await query.edit_message_text(f"❌ <b>Network / Connection Error:</b> {str(e)}")
         
         USER_FORM_STATES.pop(chat_id, None)
         return
@@ -784,8 +796,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         parts = data.split("_")
         cases, _ = await scrape_website_cases()
         report_output = format_technician_daily_report(cases, parts[2], parts[1])
-        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2]}")]], parse_mode="Markdown"))
-        return
+        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2]}")]], parse_mode="HTML")        return
 
     if data == "back_to_daily_techs":
         keyboard = [[InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
@@ -796,26 +807,26 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if data.startswith("wrep_"):
         tech_name = data.split("_")[1]
         cases, _ = await scrape_website_cases()
-        await query.edit_message_text(text=format_technician_weekly_report(cases, tech_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]]), parse_mode="Markdown")
+        await query.edit_message_text(text=format_technician_weekly_report(cases, tech_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]]), parse_mode="HTML")
         return
 
     if data == "back_to_techs":
-        keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
+        keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNIGNIANS)]
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
         await query.edit_message_text("Select an Adama District Technician to view their weekly cases report (Monday - Sunday):", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("askterm_"):
         case_id = data.split("_")[1]
-        await query.edit_message_text(text=f"⚠️ *Confirmation Required*\n\nAre you sure you want to terminate/close Case ID: *{case_id}*?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action")]]), parse_mode="Markdown")
+        await query.edit_message_text(text=f"⚠️ <b>Confirmation Required</b>\n\nAre you sure you want to terminate/close Case ID: <b>{case_id}</b>?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action")]]), parse_mode="HTML")
         return
 
     if data.startswith("do_terminate_"):
         case_id = data.split("_")[2]
-        await query.edit_message_text(f"⏳ Attempting terminal closure for Case ID `{case_id}`...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ Attempting terminal closure for Case ID <code>{case_id}</code>...", parse_mode="HTML")
         success, err_msg = await terminate_case_on_dashboard(case_id)
-        if success: await query.edit_message_text(f"✅ *Success!* Case ID `{case_id}` marked as Terminated.", parse_mode="Markdown")
-        else: await query.edit_message_text(text=f"❌ *Termination failed:*\n`{err_msg}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")], [InlineKeyboardButton("Cancel", callback_data="cancel_action")]]), parse_mode="Markdown")
+        if success: await query.edit_message_text(f"✅ <b>Success!</b> Case ID <code>{case_id}</code> marked as Terminated.", parse_mode="HTML")
+        else: await query.edit_message_text(text=f"❌ <b>Termination failed:</b>\n<code>{err_msg}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")], [InlineKeyboardButton("Cancel", callback_data="cancel_action")]]), parse_mode="HTML")
         return
 
     if data.startswith("view_") or data.startswith("refresh_"):
@@ -848,7 +859,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🔎 View Summary & Submit", callback_data="f_trigger_preview")],
             [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
         ]
-        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* እባክዎ ከታች ያለውን ማረጋገጫ በተን ይጫኑ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text("✅ <b>ሁሉም መረጃዎች በስኬት ተሰባስበዋል!</b> እባክዎ ከታች ያለውን ማረጋገጫ በተን ይጫኑ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="HTML")
 
 # ==========================================
 # 11. STARTUP MENU INITIALIZER
