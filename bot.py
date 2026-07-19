@@ -37,7 +37,7 @@ ALLOWED_TECHNICIANS = [
     "Yared Girma", "Yeshurun Asefa", "Yohanis Getiye", "Yonael Daniel"
 ]
 
-# የጉግል ፎርም ማስገቢያ ሊንክ (formResponse መሆን አለበት)
+# የጉግል ፎርም ማስገቢያ ሊንክ
 FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse"
 
 def get_eat_now():
@@ -54,8 +54,22 @@ SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
 ACTIVE_USERS_TRACKER = set()
 
-# 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ (Form State Tracker)
+# 📝 የባለብዙ-ደረጃ ፎርም ስቴት መቆጣጠሪያ
 USER_FORM_STATES = {}
+
+# 🌐 GLOBAL HTTP CLIENT (ቦቱ እንዳይቆም/እንዳይዝረከረክ በጋራ የሚሰራ)
+HTTP_CLIENT = httpx.AsyncClient(
+    headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Origin': 'https://tech24et.com',
+        'Referer': 'https://tech24et.com/'
+    },
+    follow_redirects=True,
+    timeout=10.0, # ታይምአውት ወደ 10 ሰከንድ ዝቅ ተደርጓል
+    verify=False
+)
 
 # ==========================================
 # 2. FLASK SERVER FOR KEEPALIVE (RENDER)
@@ -91,15 +105,20 @@ def clean_extracted_value(data, key_hierarchy):
     if not data: return ""
     parsed_data = safe_parse_json(data) if isinstance(data, str) else data
     if not isinstance(parsed_data, dict): return str(parsed_data)
+    
+    # መጀመሪያ ዋናዎቹን የቁልፍ ቅደም ተከተሎች መፈለግ
     for key in key_hierarchy:
         if key in parsed_data and parsed_data[key] is not None:
             val = parsed_data[key]
-            if isinstance(val, dict): return clean_extracted_value(val, key_hierarchy)
+            if isinstance(val, dict): 
+                return clean_extracted_value(val, key_hierarchy)
             return str(val)
-    for k, v in parsed_data.items():
-        if isinstance(v, (dict, str)):
-            res = clean_extracted_value(v, key_hierarchy)
-            if res: return res
+            
+    # ማለቂያ የሌለው ሉፕ (Infinite Loop) እንዳይፈጠር ተስተካክሏል
+    for key in key_hierarchy:
+        for k, v in parsed_data.items():
+            if isinstance(v, dict) and key in v:
+                return str(v[key])
     return ""
 
 def get_relative_time(date_obj):
@@ -128,7 +147,7 @@ def find_matching_technician(dashboard_tech_name):
     return None
 
 # ==========================================
-# 4. API SCRAPER & TRANSACTION ENGINES
+# 4. API SCRAPER
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -138,154 +157,142 @@ async def scrape_website_cases():
     login_url = 'https://api.tech24et.com/api/login'
     api_url = 'https://api.tech24et.com/api/callentries?limit=250'
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com',
-        'Referer': 'https://tech24et.com/'
-    }
+    try:
+        await HTTP_CLIENT.get(csrf_url)
+        xsrf_token = HTTP_CLIENT.cookies.get("XSRF-TOKEN")
+        if xsrf_token:
+            HTTP_CLIENT.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0, verify=False) as session:
-        try:
-            await session.get(csrf_url)
-            xsrf_token = session.cookies.get("XSRF-TOKEN")
-            if xsrf_token:
-                session.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+        payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
+        login_res = await HTTP_CLIENT.post(login_url, json=payload)
+        if login_res.status_code not in [200, 201, 204]:
+            return [], f"Login failed! Code: {login_res.status_code}"
 
-            payload = {'email': EMAIL.strip(), 'password': PASSWORD.strip()}
-            login_res = await session.post(login_url, json=payload)
-            if login_res.status_code not in [200, 201, 204]:
-                return [], f"Login failed! Code: {login_res.status_code}"
+        response = await HTTP_CLIENT.get(api_url)
+        if response.status_code != 200:
+            return [], f"API GET error: {response.status_code}"
 
-            response = await session.get(api_url)
-            if response.status_code != 200:
-                return [], f"API GET error: {response.status_code}"
+        data = response.json()
+        raw_list = data.get('data', []) if isinstance(data, dict) else data
+        if not isinstance(raw_list, list):
+            return [], "Error: Data response format isn't parsed into list."
 
-            data = response.json()
-            raw_list = data.get('data', []) if isinstance(data, dict) else data
-            if not isinstance(raw_list, list):
-                return [], "Error: Data response format isn't parsed into list."
-
-            scraped_cases = []
-            for entry in raw_list:
-                if not entry or not isinstance(entry, dict): continue
+        scraped_cases = []
+        for entry in raw_list:
+            if not entry or not isinstance(entry, dict): continue
+            
+            raw_string_dump = str(entry).lower()
+            if "adama" in raw_string_dump:
+                case_id = str(entry.get('callentry_id', 'N/A'))
                 
-                raw_string_dump = str(entry).lower()
-                if "adama" in raw_string_dump:
-                    case_id = str(entry.get('callentry_id', 'N/A'))
-                    
-                    terminal_data = entry.get('atmterminal') or {}
-                    terminal_no = clean_extracted_value(terminal_data, ['atmterminal_no', 'terminal_no']) if isinstance(terminal_data, dict) else 'N/A'
-                    if not terminal_no or terminal_no == "None": terminal_no = "N/A"
-                    
-                    terminal_name = clean_extracted_value(terminal_data, ['atmterminal_name', 'terminal_name']) if isinstance(terminal_data, dict) else 'N/A'
-                    if not terminal_name or terminal_name == "None": terminal_name = "N/A"
+                terminal_data = entry.get('atmterminal') or {}
+                terminal_no = clean_extracted_value(terminal_data, ['atmterminal_no', 'terminal_no']) if isinstance(terminal_data, dict) else 'N/A'
+                if not terminal_no or terminal_no == "None": terminal_no = "N/A"
+                
+                terminal_name = clean_extracted_value(terminal_data, ['atmterminal_name', 'terminal_name']) if isinstance(terminal_data, dict) else 'N/A'
+                if not terminal_name or terminal_name == "None": terminal_name = "N/A"
 
-                    bank_data = entry.get('bank') or {}
-                    bank = clean_extracted_value(bank_data, ['bank_name', 'bankname']) if isinstance(bank_data, dict) else 'Awash'
-                    if not bank or bank == "None": bank = "Awash"
+                bank_data = entry.get('bank') or {}
+                bank = clean_extracted_value(bank_data, ['bank_name', 'bankname']) if isinstance(bank_data, dict) else 'Awash'
+                if not bank or bank == "None": bank = "Awash"
 
-                    issue_data = entry.get('issuesubcategory') or entry.get('issuecategory') or {}
-                    issue = clean_extracted_value(issue_data, ['issuesubcat_name', 'issuecatname', 'name']) if isinstance(issue_data, dict) else 'ATM Issue'
-                    if not issue or issue == "None": issue = "ATM Issue"
+                issue_data = entry.get('issuesubcategory') or entry.get('issuecategory') or {}
+                issue = clean_extracted_value(issue_data, ['issuesubcat_name', 'issuecatname', 'name']) if isinstance(issue_data, dict) else 'ATM Issue'
+                if not issue or issue == "None": issue = "ATM Issue"
 
-                    branch_data = entry.get('branch') or {}
-                    branch = clean_extracted_value(branch_data, ['branch_name', 'branchname']) if isinstance(branch_data, dict) else 'Adama Branch'
-                    if not branch or branch == "None": branch = "Adama Branch"
+                branch_data = entry.get('branch') or {}
+                branch = clean_extracted_value(branch_data, ['branch_name', 'branchname']) if isinstance(branch_data, dict) else 'Adama Branch'
+                if not branch or branch == "None": branch = "Adama Branch"
 
-                    district_data = entry.get('district') or {}
-                    district = clean_extracted_value(district_data, ['dist_name', 'district_name']) if isinstance(district_data, dict) else 'Adama'
-                    if not district or district == "None": district = "Adama"
+                district_data = entry.get('district') or {}
+                district = clean_extracted_value(district_data, ['dist_name', 'district_name']) if isinstance(district_data, dict) else 'Adama'
+                if not district or district == "None": district = "Adama"
 
-                    comment = entry.get('callentry_description') or "-"
-                    if not comment or comment.strip() == "": comment = "-"
+                comment = entry.get('callentry_description') or "-"
+                if not comment or comment.strip() == "": comment = "-"
 
-                    technician = entry.get('assigned_eng', 'Not Assigned')
-                    if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
-                        tech_obj = entry.get('Technician') or entry.get('technician') or {}
-                        if isinstance(tech_obj, dict):
-                            technician = tech_obj.get('assigned_eng', 'Not Assigned')
+                technician = entry.get('assigned_eng', 'Not Assigned')
+                if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
+                    tech_obj = entry.get('Technician') or entry.get('technician') or {}
+                    if isinstance(tech_obj, dict):
+                        technician = tech_obj.get('assigned_eng', 'Not Assigned')
 
-                    if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
-                        technician = "Not Assigned"
-                    
-                    tech_phone = entry.get('assigned_phone', '-')
-                    if not tech_phone: tech_phone = "-"
+                if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
+                    technician = "Not Assigned"
+                
+                tech_phone = entry.get('assigned_phone', '-')
+                if not tech_phone: tech_phone = "-"
 
-                    created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                    if not created_at:
-                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
-                        if isinstance(tech_folder, dict):
-                            created_at = tech_folder.get('created_at') or tech_folder.get('Reported At')
+                created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
+                closed_at_raw = entry.get('closed_at') or entry.get('updated_at') or ""
 
-                    date_obj = None
-                    if created_at:
-                        date_str = str(created_at).strip()
-                        formats_to_try = (
-                            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y %H:%M",
-                            "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"
-                        )
-                        clean_time_str = date_str.split(".")[0]
-                        for fmt in formats_to_try:
-                            try:
-                                date_obj = datetime.strptime(clean_time_str, fmt).replace(tzinfo=None)
-                                break
-                            except ValueError: continue
-                                
-                    if not date_obj:
-                        date_obj = get_eat_now()
-                        date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
-                    else:
-                        date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
+                date_obj = None
+                if created_at:
+                    date_str = str(created_at).strip()
+                    formats_to_try = (
+                        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y %H:%M",
+                        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"
+                    )
+                    clean_time_str = date_str.split(".")[0]
+                    for fmt in formats_to_try:
+                        try:
+                            date_obj = datetime.strptime(clean_time_str, fmt).replace(tzinfo=None)
+                            break
+                        except ValueError: continue
+                            
+                if not date_obj:
+                    date_obj = get_eat_now()
+                    date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
+                else:
+                    date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
 
-                    status_raw = str(entry.get('callentry_status', '')).lower()
-                    if not status_raw:
-                        tech_folder = entry.get('Technician') or entry.get('technician') or {}
-                        if isinstance(tech_folder, dict):
-                            status_raw = str(tech_folder.get('callentry_status', '')).lower()
+                reg_date, reg_time = ("-", "-")
+                if date_str and " " in date_str:
+                    reg_date, reg_time = date_str.split(" ")[0], date_str.split(" ")[1][:5]
 
-                    if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
-                    else: status_text = "On going"
+                closed_date, closed_time = ("-", "-")
+                if closed_at_raw and " " in str(closed_at_raw):
+                    c_str = str(closed_at_raw).split(".")[0]
+                    closed_date, closed_time = c_str.split(" ")[0], c_str.split(" ")[1][:5]
 
-                    scraped_cases.append({
-                        'case_id': case_id, 'bank': bank, 'district': district, 'branch': branch,
-                        'terminal': terminal_no, 'atm_name': terminal_name, 'issue': issue,
-                        'status': status_text, 'comment': comment, 'technician': technician,
-                        'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj
-                    })
-            return scraped_cases, "OK"
-        except Exception as e:
-            return [], f"Scraper Exception: {str(e)}"
+                status_raw = str(entry.get('callentry_status', '')).lower()
+                if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
+                else: status_text = "On going"
+
+                scraped_cases.append({
+                    'case_id': case_id, 'bank': bank, 'district': district, 'branch': branch,
+                    'terminal': terminal_no, 'atm_name': terminal_name, 'issue': issue,
+                    'status': status_text, 'comment': comment, 'technician': technician,
+                    'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj,
+                    'reg_date': reg_date, 'reg_time': reg_time,
+                    'closed_date': closed_date, 'closed_time': closed_time
+                })
+        return scraped_cases, "OK"
+    except Exception as e:
+        logger.error(f"Scraper Exception: {str(e)}")
+        return [], f"Scraper Exception: {str(e)}"
 
 async def terminate_case_on_dashboard(case_id):
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
     login_url = "https://api.tech24et.com/api/login"
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json', 'Content-Type': 'application/json',
-        'Origin': 'https://tech24et.com', 'Referer': 'https://tech24et.com/'
-    }
+    try:
+        await HTTP_CLIENT.get(csrf_url)
+        xsrf_token = HTTP_CLIENT.cookies.get("XSRF-TOKEN")
+        if xsrf_token:
+            HTTP_CLIENT.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0, verify=False) as client:
-        try:
-            await client.get(csrf_url)
-            xsrf_token = client.cookies.get("XSRF-TOKEN")
-            if xsrf_token:
-                client.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+        payload = {"email": EMAIL.strip(), "password": PASSWORD.strip()}
+        login_res = await HTTP_CLIENT.post(login_url, json=payload)
+        if login_res.status_code not in [200, 201, 204]:
+            return False, f"Auth Error status: {login_res.status_code}"
 
-            payload = {"email": EMAIL.strip(), "password": PASSWORD.strip()}
-            login_res = await client.post(login_url, json=payload)
-            if login_res.status_code not in [200, 201, 204]:
-                return False, f"Auth Error status: {login_res.status_code}"
-
-            res = await client.post(terminate_url, json={})
-            if res.status_code in [200, 204]: return True, "Successfully Closed"
-            return False, f"API Rejected: Code {res.status_code}"
-        except Exception as e:
-            return False, str(e)
+        res = await HTTP_CLIENT.post(terminate_url, json={})
+        if res.status_code in [200, 204]: return True, "Successfully Closed"
+        return False, f"API Rejected: Code {res.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 # ==========================================
 # 5. AUTOMATIC ALARM & OVERDUE LOOP
@@ -627,7 +634,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data
     if data == "cancel_action":
-        USER_FORM_STATES.pop(chat_id, None) # ማንኛውንም የተከፈተ ስቴት ሰርዝ
+        USER_FORM_STATES.pop(chat_id, None)
         await query.message.delete()
         return
 
@@ -653,12 +660,13 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
-    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES BY ID & BRANCH
+    # 4. 🎯 DASHBOARD BUTTON CLICKED -> LIST CASES
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
         cases, status = await scrape_website_cases()
-        if status != "OK": return await query.edit_message_text(f"❌ API Sync Fail: {status}")
+        if status != "OK": 
+            return await query.edit_message_text(f"❌ API Sync Fail: {status}")
 
         today_str = get_eat_now().strftime("%d/%m/%Y")
         filtered_cases = [c for c in cases if c['date_obj'].strftime("%d/%m/%Y") == today_str and find_matching_technician(c['technician']) and find_matching_technician(c['technician']).lower() == tech_name.lower()]
@@ -672,7 +680,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 5. 🛠️ CASE SELECTED FROM DASHBOARD -> SCRAPE IT & TRIGGER ADDITIONAL GOOGLE FORM FLOW
+    # 5. 🛠️ CASE SELECTED FROM DASHBOARD
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extraction data for Google form mapping...")
@@ -682,22 +690,24 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         target_case = next((c for c in cases if c['case_id'] == case_id), None)
         if not target_case: return await query.edit_message_text("❌ Selected record could not be found.")
 
-        # አዲሱን የፎርም መረጃ ማጠራቀሚያ ስቴት ማዘጋጀት
         USER_FORM_STATES[chat_id] = {
-            'step': 'ASK_PM_TYPE', # የመጀመሪያው ተጨማሪ ጥያቄ
+            'step': 'ASK_PM_TYPE',
             'tech_name': target_case['technician'],
             'extracted_payload': {
-                'entry.283120155': target_case['case_id'],        # Case ID
-                'entry.1541091566': target_case['terminal'],       # Terminal No
-                'entry.2128913998': target_case['bank'],           # Bank Name
-                'entry.1983056024': target_case['branch'],         # Branch Name
-                'entry.1741675200': target_case['issue'],          # Issue Description
-                'entry.1994644026': target_case['status'],         # Status
-                'entry.38555627': target_case['comment'],          # Comment
+                'entry.283120155': target_case['case_id'],        
+                'entry.1541091566': target_case['terminal'],       
+                'entry.2128913998': target_case['bank'],           
+                'entry.1983056024': target_case['branch'],         
+                'entry.1741675200': target_case['issue'],          
+                'entry.1994644026': target_case['status'],         
+                'entry.38555627': target_case['comment'],          
+                'entry.regdate': target_case['reg_date'],          
+                'entry.regtime': target_case['reg_time'],          
+                'entry.clsdate': target_case['closed_date'],       
+                'entry.clstime': target_case['closed_time']        
             }
         }
         
-        # ተጨማሪ ጥያቄ 1፡ የ PM ሁኔታ
         pm_kb = [
             [InlineKeyboardButton("PM Done", callback_data="fpm_Done"),
              InlineKeyboardButton("PM Not Done", callback_data="fpm_Not_Done")],
@@ -707,19 +717,22 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.delete()
         return
 
-    # 6. ℹ️ HANDLING PM BUTTON ANSWERS
+    # 6. HANDLING PM SELECTION
     if data.startswith("fpm_"):
         pm_value = data.split("_")[1] if len(data.split("_")) == 2 else f"{data.split('_')[1]} {data.split('_')[2]}"
         if chat_id not in USER_FORM_STATES:
             return await context.bot.send_message(chat_id=chat_id, text="❌ የፎርም መሙላት ሂደቱ ጊዜ አልፎበታል፣ እባክዎ እንደገና ይጀምሩ።")
         
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") # PM Field ID
+        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") 
         USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
         
-        await query.edit_message_text(text="✍️ *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", parse_mode="Markdown")
+        kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
+        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        # አስተማማኝ ፅሁፍ ማሳያ
+        await context.bot.send_message(chat_id=chat_id, text="🔧 *2. የተወሰደው መፍትሄ (Resolution Description):*\n\nእባክዎ የተከናወነውን የቴክኒክ ስራ በፅሁፍ መልዕክት እዚህ ላይ ይላኩት።", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
-    # 7. 🚀 PRE-SUBMIT PREVIEW & SUBMIT CONFIRMATION ENGINE
+    # 7. PRE-SUBMIT PREVIEW
     if data == "f_trigger_preview":
         if chat_id not in USER_FORM_STATES: return
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
@@ -733,10 +746,13 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🏢 Branch: {payload.get('entry.1983056024')}\n"
             f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
             f"📌 Status: {payload.get('entry.1994644026')}\n"
-            f"🔧 PM: {payload.get('entry.1011663080')}\n"
+            f"🕒 Registered: {payload.get('entry.regdate', '-')} - {payload.get('entry.regtime', '-')}\n"
+            f"⏳ Closed: {payload.get('entry.clsdate', '-')} - {payload.get('entry.clstime', '-')}\n"
+            f"🔧 PM Status: {payload.get('entry.1011663080')}\n"
             f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
             f"💬 Comment: {payload.get('entry.38555627')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"እባክዎ መረጃውን አረጋግጠው 'Submit Form' የሚለውን ይጫኑ።"
         )
         final_kb = [
             [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
@@ -745,28 +761,30 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="Markdown")
         return
 
+    # 8. POST TO GOOGLE FORM
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
-        await query.edit_message_text("🚀 Sending request bundle to Google Forms API engine...")
+        await query.edit_message_text("🚀 Sending comprehensive data bundle to Google Forms...")
         
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(FORM_URL, data=payload)
                 if resp.status_code in [200, 302]:
-                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Daily report transaction fully synced.", parse_mode="Markdown")
+                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Dashboard & technician inputs fully synchronized.", parse_mode="Markdown")
                 else:
-                    await query.edit_message_text(f"❌ *Submission Failed.* Rejected by Google forms engine (Status: {resp.status_code})")
+                    await query.edit_message_text(f"❌ *Submission Failed.* Google form engine returned status code: {resp.status_code}")
         except Exception as e:
-            await query.edit_message_text(f"❌ *Network/API Error:* {str(e)}")
+            await query.edit_message_text(f"❌ *Network / Connection Error:* {str(e)}")
         
         USER_FORM_STATES.pop(chat_id, None)
         return
 
     if data.startswith("drpt_"):
         parts = data.split("_")
-        report_output = format_technician_daily_report(await scrape_website_cases()[0], parts[2], parts[1])
-        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2] Rockford}")]], parse_mode="Markdown"))
+        cases, _ = await scrape_website_cases()
+        report_output = format_technician_daily_report(cases, parts[2], parts[1])
+        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2]}")]], parse_mode="Markdown"))
         return
 
     if data == "back_to_daily_techs":
@@ -809,33 +827,31 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
-# 10. TEXT MESSAGE HANDLER FOR FORMS
+# 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
 # ==========================================
 async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id not in USER_FORM_STATES:
-        return # የፎርም ስቴት ውስጥ ካልሆነ ችላ በለው
+    if chat_id not in USER_FORM_STATES: return
 
     state_data = USER_FORM_STATES[chat_id]
     
-    # ✍️ የ Resolution መረጃዎችን መቀበል
     if state_data['step'] == 'WAITING_FOR_RESOLUTION':
         resolution_text = update.message.text
         if not resolution_text or resolution_text.strip() == "":
             await update.message.reply_text("❌ እባክዎ ትክክለኛ የፅሁፍ መግለጫ ያስገቡ።")
             return
             
-        state_data['extracted_payload']['entry.245892019'] = resolution_text # Resolution Field ID
+        state_data['extracted_payload']['entry.245892019'] = resolution_text 
         state_data['step'] = 'PREVIEW_READY'
         
         preview_kb = [
-            [InlineKeyboardButton("🔎 View Review & Preview", callback_data="f_trigger_preview")],
+            [InlineKeyboardButton("🔎 View Summary & Submit", callback_data="f_trigger_preview")],
             [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
         ]
-        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* ፎርሙን ከመላክዎ በፊት ቅድመ-ዕይታ መመልከት ይችላሉ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text("✅ *ሁሉም መረጃዎች በስኬት ተሰባስበዋል!* እባክዎ ከታች ያለውን ማረጋገጫ በተን ይጫኑ።", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
 
 # ==========================================
-# 11. STARTUP MENU INITIALIZER & LOOP STARTER
+# 11. STARTUP MENU INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
@@ -868,8 +884,6 @@ def main():
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CallbackQueryHandler(button_click_handler))
-    
-    # የቴክኒሻኖችን ፅሁፍ ግብአት ለመቀበል የተጨመረ ሪሲቨር
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_input_handler))
 
     application.run_polling()
