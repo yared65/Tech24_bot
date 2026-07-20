@@ -875,7 +875,15 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("askterm_"):
         case_id = data.split("_")[1]
-        await query.edit_message_text(text=f"⚠️ *Confirmation Required*\n\nAre you sure you want to terminate/close Case ID: *{case_id}*?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action text")]), parse_mode="Markdown")
+        await query.edit_message_text(
+            text=f"⚠️ *Confirmation Required*\n\nAre you sure you want to terminate/close Case ID: *{case_id}*?", 
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], 
+                [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], 
+                [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action")]
+            ]), 
+            parse_mode="Markdown"
+        )
         return
 
     if data.startswith("do_terminate_"):
