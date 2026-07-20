@@ -28,10 +28,10 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# 🚨 MAINTENANCE SWITCH
+# MAINTENANCE SWITCH
 MAINTENANCE_MODE = False 
 
-# 🎯 ALLOWED TECHNICIANS
+# ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
      "Girmaye Kelil", "Israel Aklilu",
      "Yared Girma", "Yohanis Getiye",
@@ -53,10 +53,10 @@ SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
 ACTIVE_USERS_TRACKER = set()
 
-# 📝 MULTI-STEP FORM STATE TRACKER
+# MULTI-STEP FORM STATE TRACKER
 USER_FORM_STATES = {}
 
-# 🌐 GLOBAL HTTP CLIENT
+# GLOBAL HTTP CLIENT
 HTTP_CLIENT = httpx.AsyncClient(
     headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -293,7 +293,7 @@ async def terminate_case_on_dashboard(case_id):
         return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC ALARM & OVERDUE LOOP (UPDATED)
+# 5. AUTOMATIC ALARM & OVERDUE LOOP
 # ==========================================
 async def check_and_alert_cases(bot, target_user_id=None):
     """Core function to broadcast or directly alert pending cases instantly."""
@@ -315,7 +315,6 @@ async def check_and_alert_cases(bot, target_user_id=None):
         mins_ago = int((time_diff.total_seconds() % 3600) // 60)
         age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
 
-        # 🛠️ ማሻሻያ 1፦ Technician እና Phone በመደበኛው አላርም መልዕክት ውስጥ እንዲካተት ተደርጓል
         notif_text = (
             f"🚨 *ATM Incident Alert* 🚨\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -332,7 +331,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
         
-        # 1. ለተወሰነ ተጠቃሚ (Direct /start Command Trigger) በቀጥታ መላክ
+        # Direct trigger for single user
         if target_user_id:
             try:
                 await bot.send_message(chat_id=target_user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
@@ -342,18 +341,16 @@ async def check_and_alert_cases(bot, target_user_id=None):
                 SENT_CASES_TRACKER.add(case_id)
             continue
 
-        # 2. መደበኛ አዲስ ኬዝ ማሳወቂያ (Background Loop Tracker)
+        # Regular new case notification
         if case_id not in SENT_CASES_TRACKER:
             SENT_CASES_TRACKER.add(case_id)
             
-            # ግሩፕ/ቻናል ካለ ወደ እሱ ይልካል (ባይኖርም ኮዱ አይቋረጥም)
             if NOTIFICATION_CHAT_ID:
                 try: 
                     await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
                 except Exception as e:
                     logger.warning(f"Could not send to NOTIFICATION_CHAT_ID: {str(e)}")
 
-            # ለሁሉም ንቁ ተጠቃሚዎች በግል ይልካል
             for user_id in list(ACTIVE_USERS_TRACKER):
                 try: 
                     await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
@@ -361,8 +358,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     pass
             continue
 
-        # 3. ከአምስት ሰዓት በላይ ለቆዩ ኬዞች አስታዋሽ (Overdue Escalation - Every 5 Hours)
-        # 🛠️ ማሻሻያ 2፦ እያንዳንዱ የትርፍ ሰዓት (Overdue) መልዕክት በተናጠል try-except ውስጥ ሆኗል፣ አንዱ ቢሳሳት ሌላው አይቋረጥም
+        # Overdue escalation (> 5 Hours)
         time_elapsed = now - case_time
         if time_elapsed >= timedelta(hours=5):
             last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -383,14 +379,12 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     f"⏳ _Duration: Still Pending!_"
                 )
                 
-                # ወደ ዋናው ግሩፕ/ቻናል መላክ
                 if NOTIFICATION_CHAT_ID:
                     try: 
                         await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
                     except Exception as e: 
                         logger.error(f"Failed to send overdue reminder to NOTIFICATION_CHAT_ID: {str(e)}")
                 
-                # ለሁሉም ንቁ ተጠቃሚዎች ማስታወሻ መላክ
                 for user_id in list(ACTIVE_USERS_TRACKER):
                     try: 
                         await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
@@ -469,8 +463,9 @@ def format_technician_daily_report(cases, selected_tech, report_type):
 
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
-    start_of_week = now - timedelta(days=now.weekday())
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Adjusted to calculate week range starting on Sunday and ending on Saturday
+    days_since_sunday = (now.weekday() + 1) % 7
+    start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
     filtered_cases = []
@@ -502,8 +497,9 @@ def format_technician_weekly_report(cases, selected_tech):
 
 def format_weekly_summary_matrix(cases):
     now = get_eat_now()
-    start_of_week = now - timedelta(days=now.weekday())
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Adjusted to calculate week range starting on Sunday and ending on Saturday
+    days_since_sunday = (now.weekday() + 1) % 7
+    start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
     filtered_cases = [c for c in cases if c.get('date_obj') and (start_of_week <= c['date_obj'] <= end_of_week)]
@@ -594,7 +590,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
     
-    # Instant execution of background scan targeting this user specifically
     await check_and_alert_cases(context.bot, target_user_id=chat_id)
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,6 +610,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=kb)
     else:
         text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details."
+        # Fixed inline button data formatting so callbacks register properly
         keyboard = [[InlineKeyboardButton(f"{get_relative_time(c.get('date_obj'))[1]} | {c['case_id']} | {c['bank']} | {c['branch']}", callback_data=f"view_{c['case_id']}")] for c in pending_cases]
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -629,7 +625,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-    await update.message.reply_text("Select an Adama District Technician to view their weekly cases report (Monday - Sunday):", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
@@ -843,7 +839,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if data == "back_to_techs":
         keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-        await query.edit_message_text("Select an Adama District Technician to view their weekly cases report (Monday - Sunday):", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("askterm_"):
@@ -859,13 +855,19 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else: await query.edit_message_text(text=f"❌ *Termination failed:*\n`{err_msg}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")], [InlineKeyboardButton("Cancel", callback_data="cancel_action")]]), parse_mode="Markdown")
         return
 
+    # Standardized parsing logic for viewing and refreshing individual cases
     if data.startswith("view_") or data.startswith("refresh_"):
-        case_id = data.split("_")[2] if len(data.split("_")) == 3 else data.split("_")[1]
-        cases, _ = await scrape_website_cases()
-        target = next((c for c in cases if c['case_id'] == case_id), None)
-        if not target: return await query.edit_message_text("❌ Record lost or finalized.")
+        case_id = data.split("view_")[-1] if data.startswith("view_") else data.split("refresh_")[-1]
+        cases, status = await scrape_website_cases()
+        if status != "OK":
+            return await query.edit_message_text(f"❌ Failed to fetch case details: {status}")
+            
+        target = next((c for c in cases if str(c['case_id']) == str(case_id)), None)
+        if not target: 
+            return await query.edit_message_text("❌ Record lost, unavailable, or finalized.")
+            
         text, kb = build_case_detail_ui(target)
-        await query.edit_message_text(text, kb)
+        await query.edit_message_text(text, reply_markup=kb)
 
 # ==========================================
 # 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
