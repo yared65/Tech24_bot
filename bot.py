@@ -270,33 +270,51 @@ async def scrape_website_cases():
         logger.error(f"Scraper Exception: {str(e)}")
         return [], f"Scraper Exception: {str(e)}"
 
+# ==========================================
+# TERMINATE CASE FUNCTION
+# ==========================================
 async def terminate_case_on_dashboard(case_id):
     terminate_url = f'https://api.tech24et.com/api/callentries/{case_id}/close'
+    update_url = f'https://api.tech24et.com/api/callentries/{case_id}'
     login_url = "https://api.tech24et.com/api/login"
     csrf_url = 'https://api.tech24et.com/sanctum/csrf-cookie'
 
     try:
+        HTTP_CLIENT.cookies.clear()
         await HTTP_CLIENT.get(csrf_url)
         xsrf_token = HTTP_CLIENT.cookies.get("XSRF-TOKEN")
         if xsrf_token:
-            HTTP_CLIENT.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token)})
+            HTTP_CLIENT.headers.update({
+                'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_token),
+                'Referer': 'https://tech24et.com/'
+            })
 
         payload = {"email": EMAIL.strip(), "password": PASSWORD.strip()}
         login_res = await HTTP_CLIENT.post(login_url, json=payload)
         if login_res.status_code not in [200, 201, 204]:
             return False, f"Auth Error status: {login_res.status_code}"
 
-        res = await HTTP_CLIENT.post(terminate_url, json={})
-        if res.status_code in [200, 204]: return True, "Successfully Closed"
+        fresh_xsrf = HTTP_CLIENT.cookies.get("XSRF-TOKEN")
+        if fresh_xsrf:
+            HTTP_CLIENT.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(fresh_xsrf)})
+
+        res = await HTTP_CLIENT.post(terminate_url, json={"status": "Completed", "callentry_status": "Completed"})
+        if res.status_code in [200, 201, 204]:
+            return True, "Successfully Closed"
+
+        res_put = await HTTP_CLIENT.put(update_url, json={"status": "Completed", "callentry_status": "Completed"})
+        if res_put.status_code in [200, 201, 204]:
+            return True, "Successfully Closed"
+
         return False, f"API Rejected: Code {res.status_code}"
     except Exception as e:
+        logger.error(f"Terminate Case Exception: {str(e)}")
         return False, str(e)
 
 # ==========================================
 # 5. AUTOMATIC ALARM & OVERDUE LOOP
 # ==========================================
 async def check_and_alert_cases(bot, target_user_id=None):
-    """Core function to broadcast or directly alert pending cases instantly."""
     cases, status = await scrape_website_cases()
     if status != "OK":
         logger.error(f"Alert Engine Scraper error: {status}")
@@ -331,7 +349,6 @@ async def check_and_alert_cases(bot, target_user_id=None):
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Check in dashboard", url="https://tech24et.com/login")]])
         
-        # Direct trigger for single user
         if target_user_id:
             try:
                 await bot.send_message(chat_id=target_user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
@@ -341,7 +358,6 @@ async def check_and_alert_cases(bot, target_user_id=None):
                 SENT_CASES_TRACKER.add(case_id)
             continue
 
-        # Regular new case notification
         if case_id not in SENT_CASES_TRACKER:
             SENT_CASES_TRACKER.add(case_id)
             
@@ -358,7 +374,6 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     pass
             continue
 
-        # Overdue escalation (> 5 Hours)
         time_elapsed = now - case_time
         if time_elapsed >= timedelta(hours=5):
             last_reminder = SENT_REMINDERS_TRACKER.get(case_id)
@@ -463,7 +478,6 @@ def format_technician_daily_report(cases, selected_tech, report_type):
 
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
-    # Adjusted to calculate week range starting on Sunday and ending on Saturday
     days_since_sunday = (now.weekday() + 1) % 7
     start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
@@ -497,7 +511,6 @@ def format_technician_weekly_report(cases, selected_tech):
 
 def format_weekly_summary_matrix(cases):
     now = get_eat_now()
-    # Adjusted to calculate week range starting on Sunday and ending on Saturday
     days_since_sunday = (now.weekday() + 1) % 7
     start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
@@ -589,7 +602,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔄 _Checking for live pending cases now..._"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
-    
     await check_and_alert_cases(context.bot, target_user_id=chat_id)
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -610,7 +622,6 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=kb)
     else:
         text = "The following ATM cases have been reported and are currently pending action. Select a case from the list below to view details."
-        # Fixed inline button data formatting so callbacks register properly
         keyboard = [[InlineKeyboardButton(f"{get_relative_time(c.get('date_obj'))[1]} | {c['case_id']} | {c['bank']} | {c['branch']}", callback_data=f"view_{c['case_id']}")] for c in pending_cases]
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_action")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -713,57 +724,46 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # DASHBOARD CASE SELECTED - START FORM FLOW
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extracting data for Google Form mapping...")
         cases, status = await scrape_website_cases()
         if status != "OK": return await query.edit_message_text(f"❌ Sync Fail: {status}")
         
-        target_case = next((c for c in cases if c['case_id'] == case_id), None)
+        target_case = next((c for c in cases if str(c['case_id']) == str(case_id)), None)
         if not target_case: return await query.edit_message_text("❌ Selected record could not be found.")
 
         USER_FORM_STATES[chat_id] = {
-            'step': 'ASK_PM_TYPE',
+            'step': 'ASK_TYPE',
             'tech_name': target_case['technician'],
             'extracted_payload': {
-                'entry.283120155': target_case['case_id'],        
-                'entry.1541091566': target_case['terminal'],       
-                'entry.2128913998': target_case['bank'],           
-                'entry.1983056024': target_case['branch'],         
-                'entry.1741675200': target_case['issue'],          
-                'entry.1994644026': target_case['status'],         
-                'entry.38555627': target_case['comment'],          
-                'entry.regdate': target_case['reg_date'],          
-                'entry.regtime': target_case['reg_time'],          
-                'entry.clsdate': target_case['closed_date'],       
-                'entry.clstime': target_case['closed_time']        
+                'entry.283120155': target_case['case_id'],              # Case Id
+                'entry.1541091566': target_case['terminal'],             # Terminal No
+                'entry.2128913998': target_case['bank'],                 # Bank
+                'entry.1983056024': target_case['branch'],               # Branch
+                'entry.1741675200': target_case['issue'],                # Case Issue
+                'entry.38555627': target_case['comment'],                # Comment
+                'entry.regdate': target_case['reg_date'],                # Registered Date
+                'entry.regtime': target_case['reg_time'],                # Registered Time
+                'entry.clsdate': target_case['closed_date'],             # Closed Date
+                'entry.clstime': target_case['closed_time'],             # Closed Time
+                
+                # AUTOMATED FIELDS
+                'entry.type2': 'case',                                   # Type2 = case (Always)
+                'entry.case_reg_type': 'Dashboard',                      # Case Registration Type = Dashboard (Always)
             }
         }
-        
-        pm_kb = [
-            [InlineKeyboardButton("PM Done", callback_data="fpm_Done"),
-             InlineKeyboardButton("PM Not Done", callback_data="fpm_Not_Done")],
+
+        type_kb = [
+            [InlineKeyboardButton("📱 Phone", callback_data="ftype_phone"),
+             InlineKeyboardButton("🏃 Physical", callback_data="ftype_physical")],
             [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
-        await context.bot.send_message(chat_id=chat_id, text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\nDashboard logs processed. Please answer configuration variables:\n\n*1. Was PM performed?*", reply_markup=InlineKeyboardMarkup(pm_kb), parse_mode="Markdown")
-        try:
-            await query.message.delete()
-        except Exception: pass
-        return
-
-    if data.startswith("fpm_"):
-        pm_value = data.split("_")[1] if len(data.split("_")) == 2 else f"{data.split('_')[1]} {data.split('_')[2]}"
-        if chat_id not in USER_FORM_STATES:
-            return await context.bot.send_message(chat_id=chat_id, text="❌ The configuration session expired, please try again.")
-        
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1011663080'] = pm_value.replace("_", " ") 
-        USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
-        
-        kb = [[InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]]
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="🔧 *2. Resolution Description:*\n\nPlease type and reply with the technical operations performed to resolve this case.", 
-            reply_markup=InlineKeyboardMarkup(kb), 
+            text=f"📊 *Form Configurator Loaded for Case {case_id}*\n\n*1. Select Support Type:*", 
+            reply_markup=InlineKeyboardMarkup(type_kb), 
             parse_mode="Markdown"
         )
         try:
@@ -771,48 +771,79 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception: pass
         return
 
-    if data == "f_trigger_preview":
+    if data.startswith("ftype_"):
+        selected_type = data.split("_")[1]
         if chat_id not in USER_FORM_STATES: return
-        payload = USER_FORM_STATES[chat_id]['extracted_payload']
         
-        preview_msg = (
-            f"📋 *Google Form Data Preview* 📋\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🆔 Case ID: {payload.get('entry.283120155')}\n"
-            f"🏧 Terminal No: {payload.get('entry.1541091566')}\n"
-            f"🏦 Bank: {payload.get('entry.2128913998')}\n"
-            f"🏢 Branch: {payload.get('entry.1983056024')}\n"
-            f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
-            f"📌 Status: {payload.get('entry.1994644026')}\n"
-            f"🕒 Registered: {payload.get('entry.regdate', '-')} - {payload.get('entry.regtime', '-')}\n"
-            f"⏳ Closed: {payload.get('entry.clsdate', '-')} - {payload.get('entry.clstime', '-')}\n"
-            f"🔧 PM Status: {payload.get('entry.1011663080')}\n"
-            f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
-            f"💬 Comment: {payload.get('entry.38555627')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Please verify the details above and click 'Submit Form' to process configuration."
-        )
-        final_kb = [
-            [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
-            [InlineKeyboardButton("❌ Cancel / Abort", callback_data="cancel_action")]
+        USER_FORM_STATES[chat_id]['extracted_payload']['entry.type'] = selected_type
+        USER_FORM_STATES[chat_id]['step'] = 'ASK_STATUS'
+
+        status_kb = [
+            [InlineKeyboardButton("✅ Completed", callback_data="fstat_Completed"),
+             InlineKeyboardButton("⏳ Pending / On going", callback_data="fstat_On going")],
+            [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
-        await query.edit_message_text(text=preview_msg, reply_markup=InlineKeyboardMarkup(final_kb), parse_mode="Markdown")
+        await query.edit_message_text(
+            text="*2. Select Case Status:*", 
+            reply_markup=InlineKeyboardMarkup(status_kb), 
+            parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("fstat_"):
+        selected_status = data.split("fstat_")[1]
+        if chat_id not in USER_FORM_STATES: return
+
+        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1994644026'] = selected_status
+        USER_FORM_STATES[chat_id]['step'] = 'ASK_SPARE'
+
+        spare_kb = [
+            [InlineKeyboardButton("Yes", callback_data="fspare_Yes"),
+             InlineKeyboardButton("No", callback_data="fspare_No")],
+            [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
+        ]
+        await query.edit_message_text(
+            text="*3. Was any Spare Part used?*", 
+            reply_markup=InlineKeyboardMarkup(spare_kb), 
+            parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("fspare_"):
+        has_spare = data.split("_")[1]
+        if chat_id not in USER_FORM_STATES: return
+
+        USER_FORM_STATES[chat_id]['extracted_payload']['entry.spare_part'] = has_spare
+
+        if has_spare == "Yes":
+            USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_PART_NAME'
+            await query.edit_message_text(
+                text="🔩 *Please type the name of the Part used:*", 
+                parse_mode="Markdown"
+            )
+        else:
+            USER_FORM_STATES[chat_id]['extracted_payload']['entry.part_name'] = "None"
+            USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
+            await query.edit_message_text(
+                text="🔧 *4. Resolution Method:*\n\nPlease type the solution/action taken to resolve this case:", 
+                parse_mode="Markdown"
+            )
         return
 
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
-        await query.edit_message_text("🚀 Sending comprehensive data bundle to Google Forms...")
+        await query.edit_message_text("🚀 Submitting data to Google Forms...")
         
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(FORM_URL, data=payload)
                 if resp.status_code in [200, 302]:
-                    await query.edit_message_text("✅ *Google Form Successfully Submitted!* Dashboard & technician inputs fully synchronized.", parse_mode="Markdown")
+                    await query.edit_message_text("✅ *Google Form Successfully Submitted!*", parse_mode="Markdown")
                 else:
-                    await query.edit_message_text(f"❌ *Submission Failed.* Google form engine returned status code: {resp.status_code}")
+                    await query.edit_message_text(f"❌ *Submission Failed.* Status code: {resp.status_code}")
         except Exception as e:
-            await query.edit_message_text(f"❌ *Network / Connection Error:* {str(e)}")
+            await query.edit_message_text(f"❌ *Network Error:* {str(e)}")
         
         USER_FORM_STATES.pop(chat_id, None)
         return
@@ -844,7 +875,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("askterm_"):
         case_id = data.split("_")[1]
-        await query.edit_message_text(text=f"⚠️ *Confirmation Required*\n\nAre you sure you want to terminate/close Case ID: *{case_id}*?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action")]]), parse_mode="Markdown")
+        await query.edit_message_text(text=f"⚠️ *Confirmation Required*\n\nAre you sure you want to terminate/close Case ID: *{case_id}*?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data=f"view_{case_id}")], [InlineKeyboardButton("✅ Yes, Terminate", callback_data=f"do_terminate_{case_id}")], [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_action text")]), parse_mode="Markdown")
         return
 
     if data.startswith("do_terminate_"):
@@ -855,7 +886,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else: await query.edit_message_text(text=f"❌ *Termination failed:*\n`{err_msg}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data=f"askterm_{case_id}")], [InlineKeyboardButton("Cancel", callback_data="cancel_action")]]), parse_mode="Markdown")
         return
 
-    # Standardized parsing logic for viewing and refreshing individual cases
     if data.startswith("view_") or data.startswith("refresh_"):
         case_id = data.split("view_")[-1] if data.startswith("view_") else data.split("refresh_")[-1]
         cases, status = await scrape_website_cases()
@@ -877,21 +907,46 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if chat_id not in USER_FORM_STATES: return
 
     state_data = USER_FORM_STATES[chat_id]
-    
-    if state_data['step'] == 'WAITING_FOR_RESOLUTION':
-        resolution_text = update.message.text
-        if not resolution_text or resolution_text.strip() == "":
-            await update.message.reply_text("❌ Input validation error: Please enter a valid text description.")
-            return
-            
-        state_data['extracted_payload']['entry.245892019'] = resolution_text 
+    step = state_data.get('step')
+    text = update.message.text.strip()
+
+    if step == 'WAITING_FOR_PART_NAME':
+        state_data['extracted_payload']['entry.part_name'] = text
+        state_data['step'] = 'WAITING_FOR_RESOLUTION'
+        await update.message.reply_text(
+            "🔧 *4. Resolution Method:*\n\nPlease type the solution/action taken to resolve this case:", 
+            parse_mode="Markdown"
+        )
+        return
+
+    if step == 'WAITING_FOR_RESOLUTION':
+        state_data['extracted_payload']['entry.245892019'] = text
         state_data['step'] = 'PREVIEW_READY'
+
+        payload = state_data['extracted_payload']
+        
+        preview_msg = (
+            f"📋 *Google Form Summary* 📋\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Case ID: {payload.get('entry.283120155')}\n"
+            f"🏧 Terminal: {payload.get('entry.1541091566')}\n"
+            f"🏦 Bank: {payload.get('entry.2128913998')}\n"
+            f"🏢 Branch: {payload.get('entry.1983056024')}\n"
+            f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
+            f"📞 Type: {payload.get('entry.type')}\n"
+            f"📌 Status: {payload.get('entry.1994644026')}\n"
+            f"🔩 Spare Part: {payload.get('entry.spare_part')}\n"
+            f"🏷️ Part Name: {payload.get('entry.part_name')}\n"
+            f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
         
         preview_kb = [
-            [InlineKeyboardButton("🔎 View Summary & Submit", callback_data="f_trigger_preview")],
+            [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
             [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
         ]
-        await update.message.reply_text("✅ *Form parameters gathered successfully!* Click the button below to preview and submit.", reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text(preview_msg, reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        return
 
 # ==========================================
 # 11. STARTUP MENU INITIALIZER
