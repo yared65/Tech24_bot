@@ -705,6 +705,50 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
+    # CASE BUTTON PRESSED -> MANUAL CASE REGISTRATION FLOW
+    if data.startswith("drpt_case_"):
+        tech_name = data.split("_")[2]
+        now_eat = get_eat_now()
+        
+        USER_FORM_STATES[chat_id] = {
+            'step': 'WAITING_FOR_BANK_NAME',
+            'tech_name': tech_name,
+            'extracted_payload': {
+                'entry.type2': 'case',
+                'entry.case_reg_type': 'Telegram',
+                'entry.regdate': now_eat.strftime("%d/%m/%Y"),
+                'entry.regtime': now_eat.strftime("%H:%M")
+            }
+        }
+        
+        await query.edit_message_text(
+            text=f"📋 *New Case Registration Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %H:%M')}` (Auto-inserted)\n\n🏦 *Please enter the Bank Name:*", 
+            parse_mode="Markdown"
+        )
+        return
+
+    # PM BUTTON PRESSED -> PREVENTIVE MAINTENANCE FLOW
+    if data.startswith("drpt_pm_"):
+        tech_name = data.split("_")[2]
+        now_eat = get_eat_now()
+        
+        USER_FORM_STATES[chat_id] = {
+            'step': 'PM_WAITING_FOR_BANK_NAME',
+            'tech_name': tech_name,
+            'extracted_payload': {
+                'entry.type2': 'PM',
+                'entry.1994644026': 'Completed',
+                'entry.regdate': now_eat.strftime("%d/%m/%Y"),
+                'entry.regtime': now_eat.strftime("%H:%M")
+            }
+        }
+        
+        await query.edit_message_text(
+            text=f"⚙️ *New PM (Preventive Maintenance) Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %H:%M')}` (Auto-inserted)\n📌 Status: `Completed` (Auto-inserted)\n\n🏦 *Please enter the Bank Name:*", 
+            parse_mode="Markdown"
+        )
+        return
+
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
@@ -776,16 +820,10 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if chat_id not in USER_FORM_STATES: return
         
         USER_FORM_STATES[chat_id]['extracted_payload']['entry.type'] = selected_type
-        USER_FORM_STATES[chat_id]['step'] = 'ASK_STATUS'
+        USER_FORM_STATES[chat_id]['step'] = 'ASK_ISSUE'
 
-        status_kb = [
-            [InlineKeyboardButton("✅ Completed", callback_data="fstat_Completed"),
-             InlineKeyboardButton("⏳ Pending / On going", callback_data="fstat_On going")],
-            [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
-        ]
         await query.edit_message_text(
-            text="*2. Select Case Status:*", 
-            reply_markup=InlineKeyboardMarkup(status_kb), 
+            text="⚠️ *Please enter the Case Issue description:*", 
             parse_mode="Markdown"
         )
         return
@@ -803,7 +841,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
         await query.edit_message_text(
-            text="*3. Was any Spare Part used?*", 
+            text="*Was any Spare Part used?*", 
             reply_markup=InlineKeyboardMarkup(spare_kb), 
             parse_mode="Markdown"
         )
@@ -823,11 +861,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         else:
             USER_FORM_STATES[chat_id]['extracted_payload']['entry.part_name'] = "None"
-            USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_RESOLUTION'
-            await query.edit_message_text(
-                text="🔧 *4. Resolution Method:*\n\nPlease type the solution/action taken to resolve this case:", 
-                parse_mode="Markdown"
-            )
+            USER_FORM_STATES[chat_id]['step'] = 'PREVIEW_READY'
+            await render_summary_and_confirm(query.message, USER_FORM_STATES[chat_id])
         return
 
     if data == "f_final_submit":
@@ -846,13 +881,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(f"❌ *Network Error:* {str(e)}")
         
         USER_FORM_STATES.pop(chat_id, None)
-        return
-
-    if data.startswith("drpt_"):
-        parts = data.split("_")
-        cases, _ = await scrape_website_cases()
-        report_output = format_technician_daily_report(cases, parts[2], parts[1])
-        await query.edit_message_text(text=report_output, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtgpm_menu_{parts[2]}")]], parse_mode="Markdown"))
         return
 
     if data == "back_to_daily_techs":
@@ -907,6 +935,39 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
+# Helper function to display summary review before final submission
+async def render_summary_and_confirm(target_message, state_data):
+    payload = state_data['extracted_payload']
+    tech = state_data.get('tech_name', 'N/A')
+    
+    summary_msg = (
+        f"📋 *Form Submission Review ({tech})* 📋\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Date/Time: {payload.get('entry.regdate')} {payload.get('entry.regtime')}\n"
+        f"🏷️ Registration Type: {payload.get('entry.type2')}\n"
+        f"🏦 Bank Name: {payload.get('entry.2128913998', '-')}\n"
+        f"🏢 Branch Name: {payload.get('entry.1983056024', '-')}\n"
+    )
+    
+    if payload.get('entry.type2') == 'case':
+        summary_msg += (
+            f"📞 Support Type: {payload.get('entry.type', '-')}\n"
+            f"⚠️ Issue: {payload.get('entry.1741675200', '-')}\n"
+            f"🔩 Spare Used: {payload.get('entry.spare_part', '-')}\n"
+            f"🏷️ Part Name: {payload.get('entry.part_name', '-')}\n"
+            f"📌 Status: {payload.get('entry.1994644026', '-')}\n"
+        )
+    else:
+        summary_msg += f"📌 Status: {payload.get('entry.1994644026', 'Completed')}\n"
+        
+    summary_msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    confirm_kb = [
+        [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")]
+    ]
+    await target_message.reply_text(summary_msg, reply_markup=InlineKeyboardMarkup(confirm_kb), parse_mode="Markdown")
+
 # ==========================================
 # 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
 # ==========================================
@@ -918,42 +979,54 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     step = state_data.get('step')
     text = update.message.text.strip()
 
-    if step == 'WAITING_FOR_PART_NAME':
-        state_data['extracted_payload']['entry.part_name'] = text
-        state_data['step'] = 'WAITING_FOR_RESOLUTION'
-        await update.message.reply_text(
-            "🔧 *4. Resolution Method:*\n\nPlease type the solution/action taken to resolve this case:", 
-            parse_mode="Markdown"
-        )
+    # --- CASE FLOW INPUTS ---
+    if step == 'WAITING_FOR_BANK_NAME':
+        state_data['extracted_payload']['entry.2128913998'] = text
+        state_data['step'] = 'WAITING_FOR_BRANCH_NAME'
+        await update.message.reply_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    if step == 'WAITING_FOR_RESOLUTION':
-        state_data['extracted_payload']['entry.245892019'] = text
-        state_data['step'] = 'PREVIEW_READY'
-
-        payload = state_data['extracted_payload']
+    if step == 'WAITING_FOR_BRANCH_NAME':
+        state_data['extracted_payload']['entry.1983056024'] = text
+        state_data['step'] = 'ASK_TYPE'
         
-        preview_msg = (
-            f"📋 *Google Form Summary* 📋\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🆔 Case ID: {payload.get('entry.283120155')}\n"
-            f"🏧 Terminal: {payload.get('entry.1541091566')}\n"
-            f"🏦 Bank: {payload.get('entry.2128913998')}\n"
-            f"🏢 Branch: {payload.get('entry.1983056024')}\n"
-            f"⚠️ Issue: {payload.get('entry.1741675200')}\n"
-            f"📞 Type: {payload.get('entry.type')}\n"
-            f"📌 Status: {payload.get('entry.1994644026')}\n"
-            f"🔩 Spare Part: {payload.get('entry.spare_part')}\n"
-            f"🏷️ Part Name: {payload.get('entry.part_name')}\n"
-            f"⚙️ Resolution: {payload.get('entry.245892019')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        preview_kb = [
-            [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
-            [InlineKeyboardButton("❌ Abort", callback_data="cancel_action")]
+        type_kb = [
+            [InlineKeyboardButton("📱 Phone", callback_data="ftype_Phone"),
+             InlineKeyboardButton("🏃 Physical", callback_data="ftype_Physical")],
+            [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
         ]
-        await update.message.reply_text(preview_msg, reply_markup=InlineKeyboardMarkup(preview_kb), parse_mode="Markdown")
+        await update.message.reply_text("📞 *Select Support Type:*", reply_markup=InlineKeyboardMarkup(type_kb), parse_mode="Markdown")
+        return
+
+    if step == 'ASK_ISSUE':
+        state_data['extracted_payload']['entry.1741675200'] = text
+        state_data['step'] = 'ASK_STATUS'
+
+        status_kb = [
+            [InlineKeyboardButton("✅ Completed", callback_data="fstat_Completed"),
+             InlineKeyboardButton("⏳ Pending / On going", callback_data="fstat_On going")],
+            [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
+        ]
+        await update.message.reply_text("📌 *Select Case Status:*", reply_markup=InlineKeyboardMarkup(status_kb), parse_mode="Markdown")
+        return
+
+    if step == 'WAITING_FOR_PART_NAME':
+        state_data['extracted_payload']['entry.part_name'] = text
+        state_data['step'] = 'PREVIEW_READY'
+        await render_summary_and_confirm(update.message, state_data)
+        return
+
+    # --- PM FLOW INPUTS ---
+    if step == 'PM_WAITING_FOR_BANK_NAME':
+        state_data['extracted_payload']['entry.2128913998'] = text
+        state_data['step'] = 'PM_WAITING_FOR_BRANCH_NAME'
+        await update.message.reply_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
+        return
+
+    if step == 'PM_WAITING_FOR_BRANCH_NAME':
+        state_data['extracted_payload']['entry.1983056024'] = text
+        state_data['step'] = 'PREVIEW_READY'
+        await render_summary_and_confirm(update.message, state_data)
         return
 
 # ==========================================
