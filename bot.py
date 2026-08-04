@@ -37,7 +37,34 @@ ALLOWED_TECHNICIANS = [
      "Yared Girma", "Yohanis Getiye",
 ]
 
-FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse"
+# ⚠️ GOOGLE FORM URL (/formResponse መሆኑን ያረጋግጡ)
+FORM_URL = os.environ.get("GOOGLE_FORM_URL", "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse")
+
+# 🎯 REAL & UPDATED GOOGLE FORM ENTRY IDs
+ENTRY_EMAIL = "entry.111111111"             
+ENTRY_TECH_NAME = "entry.206490333"         # Technician Name
+ENTRY_BANK = "entry.2128913998"             # Bank
+ENTRY_BRANCH = "entry.1983056024"           # Branch
+ENTRY_DISTRICT = "entry.1132223049"         # District
+ENTRY_TYPE2 = "entry.1173614214"            # pm / case
+
+# CASE Specific Entry IDs
+ENTRY_CASE_ID = "entry.283120155"           # Case Id
+ENTRY_TERMINAL_NO = "entry.1541091566"      # Terminal No
+ENTRY_CASE_ISSUE = "entry.1741675200"       # Case Issue
+ENTRY_REG_TYPE = "entry.1717551465"         # Case Registration Type (Dashboard / Telegram)
+ENTRY_CASE_TYPE = "entry.1287114682"        # Type (phone / physical)
+ENTRY_STATUS = "entry.1994644026"           # Status (Completed / On going)
+ENTRY_SPARE_PART = "entry.106596101"        # Spare Part (Yes / No)
+ENTRY_PART_NAME = "entry.1167440013"        # Part Name
+ENTRY_COMMENT = "entry.38555627"           # Comment
+
+# Date & Time Fields
+ENTRY_REG_DATE = "entry.2081498177"
+ENTRY_REG_TIME = "entry.1802377317"
+ENTRY_CLOSED_DATE = "entry.1340570535"
+ENTRY_CLOSED_TIME = "entry.1091544422"
+
 
 def get_eat_now():
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
@@ -724,10 +751,12 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'SELECT_BANK_NAME',
             'tech_name': tech_name,
             'extracted_payload': {
-                'entry.type2': 'case',
-                'entry.case_reg_type': 'case',  # UPDATED TO 'case' AS REQUESTED
-                'entry.regdate': now_eat.strftime("%d/%m/%Y"),
-                'entry.regtime': now_eat.strftime("%H:%M")
+                ENTRY_TECH_NAME: tech_name,
+                ENTRY_TYPE2: 'case',
+                ENTRY_REG_TYPE: 'Telegram',
+                ENTRY_DISTRICT: 'Adama',
+                ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y"),
+                ENTRY_REG_TIME: now_eat.strftime("%H:%M")
             }
         }
         
@@ -747,10 +776,12 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'PM_SELECT_BANK_NAME',
             'tech_name': tech_name,
             'extracted_payload': {
-                'entry.type2': 'PM',
-                'entry.1994644026': 'Completed',
-                'entry.regdate': now_eat.strftime("%d/%m/%Y"),
-                'entry.regtime': now_eat.strftime("%H:%M")
+                ENTRY_TECH_NAME: tech_name,
+                ENTRY_TYPE2: 'pm',
+                ENTRY_STATUS: 'Completed',
+                ENTRY_DISTRICT: 'Adama',
+                ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y"),
+                ENTRY_REG_TIME: now_eat.strftime("%H:%M")
             }
         }
         
@@ -767,15 +798,14 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if chat_id not in USER_FORM_STATES: return
 
         if selected_bank == "Other":
-            current_step = USER_FORM_STATES[chat_id]['step']
             USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_CUSTOM_BANK_NAME'
             await query.edit_message_text("✍️ *Please type the Bank Name:*", parse_mode="Markdown")
             return
 
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.2128913998'] = f"{selected_bank} Bank"
+        USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_BANK] = f"{selected_bank} Bank" if not selected_bank.endswith("Bank") else selected_bank
         
         # Determine next step depending on whether it's CASE or PM
-        if USER_FORM_STATES[chat_id]['extracted_payload'].get('entry.type2') == 'PM':
+        if USER_FORM_STATES[chat_id]['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
             USER_FORM_STATES[chat_id]['step'] = 'PM_WAITING_FOR_BRANCH_NAME'
         else:
             USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_BRANCH_NAME'
@@ -816,20 +846,22 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'ASK_TYPE',
             'tech_name': target_case['technician'],
             'extracted_payload': {
-                'entry.283120155': target_case['case_id'],              # Case Id
-                'entry.1541091566': target_case['terminal'],             # Terminal No
-                'entry.2128913998': target_case['bank'],                 # Bank
-                'entry.1983056024': target_case['branch'],               # Branch
-                'entry.1741675200': target_case['issue'],                # Case Issue
-                'entry.38555627': target_case['comment'],                # Comment
-                'entry.regdate': target_case['reg_date'],                # Registered Date
-                'entry.regtime': target_case['reg_time'],                # Registered Time
-                'entry.clsdate': target_case['closed_date'],             # Closed Date
-                'entry.clstime': target_case['closed_time'],             # Closed Time
+                ENTRY_TECH_NAME: target_case['technician'],
+                ENTRY_CASE_ID: target_case['case_id'],
+                ENTRY_TERMINAL_NO: target_case['terminal'],
+                ENTRY_BANK: target_case['bank'],
+                ENTRY_BRANCH: target_case['branch'],
+                ENTRY_CASE_ISSUE: target_case['issue'],
+                ENTRY_COMMENT: target_case['comment'],
+                ENTRY_DISTRICT: target_case['district'],
+                ENTRY_REG_DATE: target_case['reg_date'],
+                ENTRY_REG_TIME: target_case['reg_time'],
+                ENTRY_CLOSED_DATE: target_case['closed_date'],
+                ENTRY_CLOSED_TIME: target_case['closed_time'],
                 
                 # AUTOMATED FIELDS
-                'entry.type2': 'case',                                   # Type2 = case (Always)
-                'entry.case_reg_type': 'Dashboard',                      # Case Registration Type = Dashboard (Always)
+                ENTRY_TYPE2: 'case',
+                ENTRY_REG_TYPE: 'Dashboard',
             }
         }
 
@@ -853,20 +885,26 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         selected_type = data.split("_")[1]
         if chat_id not in USER_FORM_STATES: return
         
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.type'] = selected_type
+        USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_CASE_TYPE] = selected_type
         USER_FORM_STATES[chat_id]['step'] = 'ASK_ISSUE'
 
-        await query.edit_message_text(
-            text="⚠️ *Please enter the Case Issue description:*", 
-            parse_mode="Markdown"
-        )
+        if ENTRY_CASE_ISSUE in USER_FORM_STATES[chat_id]['extracted_payload']:
+            USER_FORM_STATES[chat_id]['step'] = 'ASK_STATUS'
+            status_kb = [
+                [InlineKeyboardButton("✅ Completed", callback_data="fstat_Completed"),
+                 InlineKeyboardButton("⏳ Pending / On going", callback_data="fstat_On going")],
+                [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
+            ]
+            await query.edit_message_text("📌 *Select Case Status:*", reply_markup=InlineKeyboardMarkup(status_kb), parse_mode="Markdown")
+        else:
+            await query.edit_message_text("⚠️ *Please enter the Case Issue description:*", parse_mode="Markdown")
         return
 
     if data.startswith("fstat_"):
         selected_status = data.split("fstat_")[1]
         if chat_id not in USER_FORM_STATES: return
 
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.1994644026'] = selected_status
+        USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_STATUS] = selected_status
         USER_FORM_STATES[chat_id]['step'] = 'ASK_SPARE'
 
         spare_kb = [
@@ -885,7 +923,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         has_spare = data.split("_")[1]
         if chat_id not in USER_FORM_STATES: return
 
-        USER_FORM_STATES[chat_id]['extracted_payload']['entry.spare_part'] = has_spare
+        USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_SPARE_PART] = has_spare
 
         if has_spare == "Yes":
             USER_FORM_STATES[chat_id]['step'] = 'WAITING_FOR_PART_NAME'
@@ -894,18 +932,19 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="Markdown"
             )
         else:
-            USER_FORM_STATES[chat_id]['extracted_payload']['entry.part_name'] = "None"
+            USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_PART_NAME] = "None"
             USER_FORM_STATES[chat_id]['step'] = 'PREVIEW_READY'
             await render_summary_and_confirm(query.message, USER_FORM_STATES[chat_id])
         return
 
+    # 🚀 የ GOOGLE FORM FINAL SUBMIT HANDLER
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Submitting data to Google Forms...")
         
         payload = USER_FORM_STATES[chat_id]['extracted_payload']
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
                 resp = await client.post(FORM_URL, data=payload)
                 if resp.status_code in [200, 302]:
                     await query.edit_message_text("✅ *Google Form Successfully Submitted!*", parse_mode="Markdown")
@@ -977,22 +1016,22 @@ async def render_summary_and_confirm(target_message, state_data):
     summary_msg = (
         f"📋 *Form Submission Review ({tech})* 📋\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📅 Date/Time: {payload.get('entry.regdate')} {payload.get('entry.regtime')}\n"
-        f"🏷️ Registration Type: {payload.get('entry.case_reg_type')}\n"
-        f"🏦 Bank Name: {payload.get('entry.2128913998', '-')}\n"
-        f"🏢 Branch Name: {payload.get('entry.1983056024', '-')}\n"
+        f"📅 Date/Time: {payload.get(ENTRY_REG_DATE, '-')} {payload.get(ENTRY_REG_TIME, '-')}\n"
+        f"🏷️ Registration Type: {payload.get(ENTRY_REG_TYPE, 'N/A')}\n"
+        f"🏦 Bank Name: {payload.get(ENTRY_BANK, '-')}\n"
+        f"🏢 Branch Name: {payload.get(ENTRY_BRANCH, '-')}\n"
     )
     
-    if payload.get('entry.type2') == 'case':
+    if payload.get(ENTRY_TYPE2) == 'case':
         summary_msg += (
-            f"📞 Support Type: {payload.get('entry.type', '-')}\n"
-            f"⚠️ Issue: {payload.get('entry.1741675200', '-')}\n"
-            f"🔩 Spare Used: {payload.get('entry.spare_part', '-')}\n"
-            f"🏷️ Part Name: {payload.get('entry.part_name', '-')}\n"
-            f"📌 Status: {payload.get('entry.1994644026', '-')}\n"
+            f"📞 Support Type: {payload.get(ENTRY_CASE_TYPE, '-')}\n"
+            f"⚠️ Issue: {payload.get(ENTRY_CASE_ISSUE, '-')}\n"
+            f"🔩 Spare Used: {payload.get(ENTRY_SPARE_PART, '-')}\n"
+            f"🏷️ Part Name: {payload.get(ENTRY_PART_NAME, '-')}\n"
+            f"📌 Status: {payload.get(ENTRY_STATUS, '-')}\n"
         )
     else:
-        summary_msg += f"📌 Status: {payload.get('entry.1994644026', 'Completed')}\n"
+        summary_msg += f"📌 Status: {payload.get(ENTRY_STATUS, 'Completed')}\n"
         
     summary_msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -1015,8 +1054,8 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # --- CUSTOM BANK NAME TEXT INPUT ---
     if step == 'WAITING_FOR_CUSTOM_BANK_NAME':
-        state_data['extracted_payload']['entry.2128913998'] = text
-        if state_data['extracted_payload'].get('entry.type2') == 'PM':
+        state_data['extracted_payload'][ENTRY_BANK] = text
+        if state_data['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
             state_data['step'] = 'PM_WAITING_FOR_BRANCH_NAME'
         else:
             state_data['step'] = 'WAITING_FOR_BRANCH_NAME'
@@ -1025,7 +1064,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # --- CASE FLOW INPUTS ---
     if step == 'WAITING_FOR_BRANCH_NAME':
-        state_data['extracted_payload']['entry.1983056024'] = text
+        state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'ASK_TYPE'
         
         type_kb = [
@@ -1037,7 +1076,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if step == 'ASK_ISSUE':
-        state_data['extracted_payload']['entry.1741675200'] = text
+        state_data['extracted_payload'][ENTRY_CASE_ISSUE] = text
         state_data['step'] = 'ASK_STATUS'
 
         status_kb = [
@@ -1049,14 +1088,14 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if step == 'WAITING_FOR_PART_NAME':
-        state_data['extracted_payload']['entry.part_name'] = text
+        state_data['extracted_payload'][ENTRY_PART_NAME] = text
         state_data['step'] = 'PREVIEW_READY'
         await render_summary_and_confirm(update.message, state_data)
         return
 
     # --- PM FLOW INPUTS ---
     if step == 'PM_WAITING_FOR_BRANCH_NAME':
-        state_data['extracted_payload']['entry.1983056024'] = text
+        state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'PREVIEW_READY'
         await render_summary_and_confirm(update.message, state_data)
         return
