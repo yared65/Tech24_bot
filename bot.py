@@ -511,7 +511,7 @@ def format_technician_daily_report(cases, selected_tech, report_type):
     return "\n".join(report_lines)
 
 # --------------------------------------------------------------------------
-# ⚠️ WEEKLY REPORT FORMATTER (CLOSED DATE & TIME ታክሎበታል)
+# WEEKLY REPORT FORMATTER
 # --------------------------------------------------------------------------
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
@@ -767,9 +767,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception: pass
         return
 
-    # --------------------------------------------------------------------------
-    # ⚠️ DAILY REPORT MAIN MENU (INSTRUCTIONS & ICONS የተስተካከለበት)
-    # --------------------------------------------------------------------------
+    # DAILY REPORT MAIN MENU
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
         confirm_text = (
@@ -787,9 +785,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
         return
 
-    # --------------------------------------------------------------------------
-    # ⚠️ TELEGRAM & PM SUB-MENU (INSTRUCTIONS & ICONS የተስተካከለበት)
-    # --------------------------------------------------------------------------
+    # TELEGRAM & PM SUB-MENU
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
         tgpm_text = (
@@ -1051,10 +1047,19 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("📋 *Daily Report Menu*\n\n 👥 Select an Adama District Technician:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # --------------------------------------------------------------------------
+    # FIXED SYNTAX ERROR HERE (Line updated)
+    # --------------------------------------------------------------------------
     if data.startswith("wrep_"):
         tech_name = data.split("_")[1]
         cases, _ = await scrape_website_cases()
-        await query.edit_message_text(text=format_technician_weekly_report(cases, tech_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]), parse_mode="Markdown")
+        await query.edit_message_text(
+            text=format_technician_weekly_report(cases, tech_name),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "back_to_techs":
