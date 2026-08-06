@@ -37,10 +37,10 @@ ALLOWED_TECHNICIANS = [
      "Yared Girma", "Yohanis Getiye",
 ]
 
-# ⚠️ GOOGLE FORM URL (/formResponse መሆኑን ያረጋግጡ)
+# GOOGLE FORM URL
 FORM_URL = os.environ.get("GOOGLE_FORM_URL", "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse")
 
-# 🎯 REAL & UPDATED GOOGLE FORM ENTRY IDs
+# REAL & UPDATED GOOGLE FORM ENTRY IDs
 ENTRY_EMAIL = "entry.111111111"             
 ENTRY_TECH_NAME = "entry.206490333"         # Technician Name
 ENTRY_BANK = "entry.2128913998"             # Bank
@@ -275,10 +275,17 @@ async def scrape_website_cases():
                 if date_str and " " in date_str:
                     reg_date, reg_time = date_str.split(" ")[0], date_str.split(" ")[1][:5]
 
+                # የተዘጋበትን ቀን በጥንቃቄ መውሰድ (Closed Date Tracking)
                 closed_date, closed_time = ("-", "-")
+                closed_date_obj = None
                 if closed_at_raw and " " in str(closed_at_raw):
                     c_str = str(closed_at_raw).split(".")[0].replace("T", " ")
                     closed_date, closed_time = c_str.split(" ")[0], c_str.split(" ")[1][:5]
+                    for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"):
+                        try:
+                            closed_date_obj = datetime.strptime(c_str, fmt).replace(tzinfo=None)
+                            break
+                        except ValueError: pass
 
                 status_raw = str(entry.get('callentry_status', '')).lower()
                 if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
@@ -289,6 +296,7 @@ async def scrape_website_cases():
                     'terminal': terminal_no, 'atm_name': terminal_name, 'issue': issue,
                     'status': status_text, 'comment': comment, 'technician': technician,
                     'tech_phone': tech_phone, 'date_raw': date_str, 'date_obj': date_obj,
+                    'closed_date_obj': closed_date_obj,
                     'reg_date': reg_date, 'reg_time': reg_time,
                     'closed_date': closed_date, 'closed_time': closed_time
                 })
@@ -804,7 +812,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         USER_FORM_STATES[chat_id]['extracted_payload'][ENTRY_BANK] = f"{selected_bank} Bank" if not selected_bank.endswith("Bank") else selected_bank
         
-        # Determine next step depending on whether it's CASE or PM
         if USER_FORM_STATES[chat_id]['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
             USER_FORM_STATES[chat_id]['step'] = 'PM_WAITING_FOR_BRANCH_NAME'
         else:
@@ -813,21 +820,46 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
+    # 🛠️ የተስተካከለው የ DASHBOARD BUTTON HANDLER (ተዘጉትም ጭምር ይታያሉ)
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
-        await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
+        await query.edit_message_text("⏳ Syncing weekly/daily logs from dashboard portal...")
         cases, status = await scrape_website_cases()
         if status != "OK": 
             return await query.edit_message_text(f"❌ API Sync Fail: {status}")
 
-        today_str = get_eat_now().strftime("%d/%m/%Y")
-        filtered_cases = [c for c in cases if c.get('date_obj') and c['date_obj'].strftime("%d/%m/%Y") == today_str and find_matching_technician(c['technician']) and find_matching_technician(c['technician']).lower() == tech_name.lower()]
+        now = get_eat_now()
+        days_since_sunday = (now.weekday() + 1) % 7
+        start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
+
+        filtered_cases = []
+        for c in cases:
+            matched_tech = find_matching_technician(c['technician'])
+            if matched_tech and matched_tech.lower() == tech_name.lower():
+                c_date = c.get('date_obj')
+                c_closed_date = c.get('closed_date_obj')
+                
+                is_created_this_week = c_date and (start_of_week <= c_date <= end_of_week)
+                is_closed_this_week = c_closed_date and (start_of_week <= c_closed_date <= end_of_week)
+
+                if is_created_this_week or is_closed_this_week:
+                    filtered_cases.append(c)
 
         if not filtered_cases:
-            return await query.edit_message_text(text=f"📭 *No dashboard cases found for {tech_name} today ({today_str}).*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]], parse_mode="Markdown"))
+            return await query.edit_message_text(
+                text=f"📭 *No dashboard cases found for {tech_name} for this week (Sunday - Saturday).*", 
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]])
+            )
 
-        text = f"📋 *Today's Dashboard Cases for {tech_name}:*\nSelect a case to initiate reporting."
-        keyboard = [[InlineKeyboardButton(f"ID: {c['case_id']} | {c['branch']}", callback_data=f"fcase_{c['case_id']}")] for c in filtered_cases]
+        text = f"📋 *Dashboard Cases for {tech_name} (This Week):*\nSelect a case to initiate Google Form submission."
+        
+        keyboard = []
+        for c in filtered_cases:
+            status_icon = "✅" if c['status'] == "Completed" else "⏳"
+            btn_text = f"{status_icon} ID: {c['case_id']} | {c['branch']} ({c['status']})"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"fcase_{c['case_id']}")])
+
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")])
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
@@ -937,7 +969,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await render_summary_and_confirm(query.message, USER_FORM_STATES[chat_id])
         return
 
-    # 🚀 የ GOOGLE FORM FINAL SUBMIT HANDLER
+    # GOOGLE FORM FINAL SUBMIT HANDLER
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Submitting data to Google Forms...")
@@ -1052,7 +1084,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     step = state_data.get('step')
     text = update.message.text.strip()
 
-    # --- CUSTOM BANK NAME TEXT INPUT ---
+    # CUSTOM BANK NAME TEXT INPUT
     if step == 'WAITING_FOR_CUSTOM_BANK_NAME':
         state_data['extracted_payload'][ENTRY_BANK] = text
         if state_data['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
@@ -1062,7 +1094,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    # --- CASE FLOW INPUTS ---
+    # CASE FLOW INPUTS
     if step == 'WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'ASK_TYPE'
@@ -1093,7 +1125,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await render_summary_and_confirm(update.message, state_data)
         return
 
-    # --- PM FLOW INPUTS ---
+    # PM FLOW INPUTS
     if step == 'PM_WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'PREVIEW_READY'
