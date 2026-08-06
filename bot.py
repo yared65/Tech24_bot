@@ -275,7 +275,6 @@ async def scrape_website_cases():
                 if date_str and " " in date_str:
                     reg_date, reg_time = date_str.split(" ")[0], date_str.split(" ")[1][:5]
 
-                # የተዘጋበትን ቀን በጥንቃቄ መውሰድ (Closed Date Tracking)
                 closed_date, closed_time = ("-", "-")
                 closed_date_obj = None
                 if closed_at_raw and " " in str(closed_at_raw):
@@ -511,6 +510,9 @@ def format_technician_daily_report(cases, selected_tech, report_type):
         report_lines.append(line)
     return "\n".join(report_lines)
 
+# --------------------------------------------------------------------------
+# ⚠️ WEEKLY REPORT FORMATTER (CLOSED DATE & TIME ታክሎበታል)
+# --------------------------------------------------------------------------
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
     days_since_sunday = (now.weekday() + 1) % 7
@@ -519,29 +521,66 @@ def format_technician_weekly_report(cases, selected_tech):
 
     filtered_cases = []
     for c in cases:
-        if c.get('date_obj') and (start_of_week <= c['date_obj'] <= end_of_week):
+        c_date = c.get('date_obj')
+        c_closed_date = c.get('closed_date_obj')
+        
+        is_created_this_week = c_date and (start_of_week <= c_date <= end_of_week)
+        is_closed_this_week = c_closed_date and (start_of_week <= c_closed_date <= end_of_week)
+
+        if is_created_this_week or is_closed_this_week:
             matched_tech = find_matching_technician(c['technician'])
-            if matched_tech and matched_tech.lower() == selected_tech.lower(): filtered_cases.append(c)
+            if matched_tech and matched_tech.lower() == selected_tech.lower():
+                filtered_cases.append(c)
 
     if not filtered_cases:
-        return f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📭 *Currently, there are no recorded cases assigned to this technician for this week.*\n\n🌟 Keep up the great work!\n━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        return (
+            f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📭 *Currently, there are no recorded cases assigned to this technician for this week.*\n\n"
+            f"🌟 Keep up the great work!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
     report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
+
     for idx, c in enumerate(filtered_cases, start=1):
-        date_formatted = c['date_obj'].strftime("%d/%m/%Y")
-        status_emoji = "✅ Completed" if c['status'] == "Completed" else "⏳ On going"
-        line = f"{idx}. ID: {c['case_id']}\n🏦 Bank: {c['bank']} ({c['branch']} branch)\n⚠️ Issue: {c['issue']}\n📅 Date: {date_formatted}\n📌 Status: {status_emoji}\n----------------------------------------"
+        reg_datetime_str = c['date_obj'].strftime("%d/%m/%Y %H:%M") if c.get('date_obj') else c.get('date_raw', '-')
+        
+        if c.get('status') == "Completed":
+            if c.get('closed_date_obj'):
+                closed_str = c['closed_date_obj'].strftime("%d/%m/%Y %H:%M")
+            elif c.get('closed_date') != "-" and c.get('closed_time') != "-":
+                closed_str = f"{c['closed_date']} {c['closed_time']}"
+            else:
+                closed_str = "Completed (No timestamp)"
+            status_line = f"📌 Status: ✅ Completed\n✅ Closed: {closed_str}"
+        else:
+            status_line = "📌 Status: ⏳ On going"
+
+        line = (
+            f"{idx}. ID: {c['case_id']}\n"
+            f"🏦 Bank: {c['bank']} ({c['branch']} branch)\n"
+            f"⚠️ Issue: {c['issue']}\n"
+            f"📅 Reported: {reg_datetime_str}\n"
+            f"{status_line}\n"
+            f"----------------------------------------"
+        )
         report_lines.append(line)
 
     report_lines.append("\n        *Summary Overview*")
     bank_analytics = {}
     for case in filtered_cases:
         b_name = case['bank']
-        if b_name not in bank_analytics: bank_analytics[b_name] = {"completed": 0, "ongoing": 0}
-        if case['status'] == "Completed": bank_analytics[b_name]["completed"] += 1
-        else: bank_analytics[b_name]["ongoing"] += 1
+        if b_name not in bank_analytics: 
+            bank_analytics[b_name] = {"completed": 0, "ongoing": 0}
+        if case['status'] == "Completed": 
+            bank_analytics[b_name]["completed"] += 1
+        else: 
+            bank_analytics[b_name]["ongoing"] += 1
 
     for bank_name, stats in bank_analytics.items():
         report_lines.append(f"*{bank_name} Bank*\n    Completed: {stats['completed']}\n    On going: {stats['ongoing']}")
+        
     return "\n".join(report_lines)
 
 def format_weekly_summary_matrix(cases):
@@ -663,15 +702,15 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
-    keyboard = [[InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
+    keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-    await update.message.reply_text("Select an Adama District Technician to view their Daily report:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("📋 *Daily Report Menu*\n\n 👥 Please select an Adama District Technician:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
-    keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
+    keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-    await update.message.reply_text("Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("📊 *Weekly Report Menu*\n\n 👥 Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
@@ -728,23 +767,41 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception: pass
         return
 
+    # --------------------------------------------------------------------------
+    # ⚠️ DAILY REPORT MAIN MENU (INSTRUCTIONS & ICONS የተስተካከለበት)
+    # --------------------------------------------------------------------------
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
-        confirm_text = f"      🔥 *Daily Report Menu*\n\nℹ️ For Dashboard cases, select the Dashboard button.\n\n  ℹ️ For Telegram cases and PM, select the Telegram & PM button.\n\n"
+        confirm_text = (
+            f"🔥 *Daily Report Option Menu for {tech_name}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"ℹ️ *ለ Dashboard ኬዞች ሪፖርት ማድረጊያ:* 👉 *📊 Dashboard* አዝራሩን ይጫኑ።\n\n"
+            f"ℹ️ *ለ Telegram ኬዞች እና ለ PM ሪፖርቶች:* 👉 *📱 Telegram & PM* አዝራሩን ይጫኑ።\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
         confirm_keyboard = [
-            [InlineKeyboardButton("Dashboard", callback_data=f"ddash_{tech_name}"),
-             InlineKeyboardButton("Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")],
+            [InlineKeyboardButton("📊 Dashboard", callback_data=f"ddash_{tech_name}"),
+             InlineKeyboardButton("📱 Telegram & PM", callback_data=f"dtgpm_menu_{tech_name}")],
             [InlineKeyboardButton("🔙 Back to Technicians", callback_data="back_to_daily_techs")]
         ]
         await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
         return
 
+    # --------------------------------------------------------------------------
+    # ⚠️ TELEGRAM & PM SUB-MENU (INSTRUCTIONS & ICONS የተስተካከለበት)
+    # --------------------------------------------------------------------------
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
-        tgpm_text = f"     *Telegram and PM Report* \n\n ℹ️ For Telegram registered cases, click the *CASE* button.\n \n ℹ️ For PM reports, click the *PM* button. \n\n"
+        tgpm_text = (
+            f"📱 *Telegram & PM Report Options ({tech_name})*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"ℹ️ *በ Telegram የመጡ ኬዞችን ለመመዝገብ:* 👉 *📋 CASE* የሚለውን ይጫኑ።\n\n"
+            f"ℹ️ *የ PM (Preventive Maintenance) ሪፖርት ለማስገባት:* 👉 *⚙️ PM* የሚለውን ይጫኑ።\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
         tgpm_keyboard = [
-            [InlineKeyboardButton("CASE", callback_data=f"drpt_case_{tech_name}"),
-             InlineKeyboardButton("PM", callback_data=f"drpt_pm_{tech_name}")],
+            [InlineKeyboardButton("📋 CASE", callback_data=f"drpt_case_{tech_name}"),
+             InlineKeyboardButton("⚙️ PM", callback_data=f"drpt_pm_{tech_name}")],
             [InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]
         ]
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
@@ -820,7 +877,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    # 🛠️ የተስተካከለው የ DASHBOARD BUTTON HANDLER (ተዘጉትም ጭምር ይታያሉ)
+    # DASHBOARD BUTTON HANDLER
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing weekly/daily logs from dashboard portal...")
@@ -852,7 +909,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]])
             )
 
-        text = f"📋 *Dashboard Cases for {tech_name} (This Week):*\nSelect a case to initiate Google Form submission."
+        text = f"📊 *Dashboard Cases for {tech_name} (This Week):*\nSelect a case to initiate Google Form submission."
         
         keyboard = []
         for c in filtered_cases:
@@ -989,21 +1046,21 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if data == "back_to_daily_techs":
-        keyboard = [[InlineKeyboardButton(tech, callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
+        keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-        await query.edit_message_text("Select an Adama District Technician to view their Daily report:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("📋 *Daily Report Menu*\n\n 👥 Select an Adama District Technician:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("wrep_"):
         tech_name = data.split("_")[1]
         cases, _ = await scrape_website_cases()
-        await query.edit_message_text(text=format_technician_weekly_report(cases, tech_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]]), parse_mode="Markdown")
+        await query.edit_message_text(text=format_technician_weekly_report(cases, tech_name), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]), parse_mode="Markdown")
         return
 
     if data == "back_to_techs":
-        keyboard = [[InlineKeyboardButton(tech, callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
+        keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-        await query.edit_message_text("Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("📊 *Weekly Report Menu*\n\n 👥 Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("askterm_"):
