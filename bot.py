@@ -773,8 +773,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         confirm_text = (
             f"🔥 *Daily Report Option Menu for {tech_name}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"ℹ️ *ለ Dashboard ኬዞች ሪፖርት ማድረጊያ:* 👉 *📊 Dashboard* አዝራሩን ይጫኑ።\n\n"
-            f"ℹ️ *ለ Telegram ኬዞች እና ለ PM ሪፖርቶች:* 👉 *📱 Telegram & PM* አዝራሩን ይጫኑ።\n\n"
+            f"ℹ️ *For Dashboard Cases Report:* 👉 Press the *📊 Dashboard* button.\n\n"
+            f"ℹ️ *For Telegram Cases & PM Reports:* 👉 Press the *📱 Telegram & PM* button.\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         confirm_keyboard = [
@@ -791,8 +791,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         tgpm_text = (
             f"📱 *Telegram & PM Report Options ({tech_name})*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"ℹ️ *በ Telegram የመጡ ኬዞችን ለመመዝገብ:* 👉 *📋 CASE* የሚለውን ይጫኑ።\n\n"
-            f"ℹ️ *የ PM (Preventive Maintenance) ሪፖርት ለማስገባት:* 👉 *⚙️ PM* የሚለውን ይጫኑ።\n\n"
+            f"ℹ️ *To register cases received via Telegram:* 👉 Press *📋 CASE*.\n\n"
+            f"ℹ️ *To submit a PM (Preventive Maintenance) report:* 👉 Press *⚙️ PM*.\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         tgpm_keyboard = [
@@ -1047,9 +1047,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("📋 *Daily Report Menu*\n\n 👥 Select an Adama District Technician:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # --------------------------------------------------------------------------
-    # FIXED SYNTAX ERROR HERE (Line updated)
-    # --------------------------------------------------------------------------
     if data.startswith("wrep_"):
         tech_name = data.split("_")[1]
         cases, _ = await scrape_website_cases()
