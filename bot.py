@@ -28,8 +28,9 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# MAINTENANCE SWITCH
-MAINTENANCE_MODE = True 
+# MAINTENANCE SWITCH & TRACKER
+MAINTENANCE_MODE = True  # 👈 True ሲሆን ወዲያውኑ ወደ ቦቱ Alert ይልካል
+MAINTENANCE_ALERT_SENT = False
 
 # ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
@@ -172,7 +173,7 @@ def find_matching_technician(dashboard_tech_name):
     return None
 
 # ==========================================
-# 4. API SCRAPER (UPDATED TIME FORMAT)
+# 4. API SCRAPER
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -255,16 +256,11 @@ async def scrape_website_cases():
                 if created_at:
                     date_str = str(created_at).strip()
                     formats_to_try = (
-                        "%Y-%m-%d %I:%M %p",       # 2026-08-14 04:57 PM
-                        "%Y-%m-%d %I:%M:%S %p",    # 2026-08-14 04:57:00 PM
-                        "%d/%m/%Y %I:%M %p",       # 14/08/2026 04:57 PM
-                        "%d/%m/%Y %I:%M:%S %p",    # 14/08/2026 04:57:00 PM
-                        "%d/%m/%Y %H:%M:%S", 
-                        "%d/%m/%Y %H:%M",
-                        "%Y-%m-%d %H:%M:%S", 
-                        "%Y-%m-%dT%H:%M:%S", 
-                        "%d/%m/%Y", 
-                        "%Y-%m-%d"
+                        "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M:%S %p",
+                        "%d/%m/%Y %I:%M %p", "%d/%m/%Y %I:%M:%S %p",
+                        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+                        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", 
+                        "%d/%m/%Y", "%Y-%m-%d"
                     )
                     clean_time_str = date_str.split(".")[0].replace("T", " ")
                     for fmt in formats_to_try:
@@ -276,7 +272,6 @@ async def scrape_website_cases():
                 if not date_obj:
                     date_obj = get_eat_now()
 
-                # 💡 1. Registered time በ 12-Hour (AM/PM) format እንዲሆን ተደርጓል
                 reg_date = date_obj.strftime("%d/%m/%Y")
                 reg_time = date_obj.strftime("%I:%M %p")
                 date_str = f"{reg_date} {reg_time}"
@@ -452,14 +447,37 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     except Exception as e: 
                         logger.warning(f"Failed to send overdue reminder to individual user {user_id}: {str(e)}")
 
+# 💡 💡 MAINTENANCE ALERT SENDER LOOP 💡 💡
 async def start_independent_alarm_loop(bot):
+    global MAINTENANCE_ALERT_SENT
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
+    
     while True:
         try:
-            if not MAINTENANCE_MODE:
+            if MAINTENANCE_MODE:
+                if not MAINTENANCE_ALERT_SENT:
+                    m_msg = get_maintenance_message()
+                    
+                    if NOTIFICATION_CHAT_ID:
+                        try:
+                            await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=m_msg, parse_mode="Markdown")
+                        except Exception as e:
+                            logger.error(f"Failed to send maintenance alert to NOTIFICATION_CHAT_ID: {e}")
+
+                    for user_id in list(ACTIVE_USERS_TRACKER):
+                        try:
+                            await bot.send_message(chat_id=user_id, text=m_msg, parse_mode="Markdown")
+                        except Exception as e:
+                            logger.warning(f"Failed to send maintenance alert to user {user_id}: {e}")
+
+                    MAINTENANCE_ALERT_SENT = True
+            else:
+                MAINTENANCE_ALERT_SENT = False
                 await check_and_alert_cases(bot)
+                
         except Exception as e:
             logger.error(f"Error inside independent background loop: {str(e)}")
+            
         await asyncio.sleep(20)
 
 def get_maintenance_message():
@@ -522,9 +540,6 @@ def format_technician_daily_report(cases, selected_tech, report_type):
         report_lines.append(line)
     return "\n".join(report_lines)
 
-# --------------------------------------------------------------------------
-# WEEKLY REPORT FORMATTER
-# --------------------------------------------------------------------------
 def format_technician_weekly_report(cases, selected_tech):
     now = get_eat_now()
     days_since_sunday = (now.weekday() + 1) % 7
@@ -671,9 +686,9 @@ def generate_excel_bytes(cases):
 # 8. TELEGRAM COMMAND HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     chat_id = update.effective_chat.id
     ACTIVE_USERS_TRACKER.add(chat_id)
+    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
 
     welcome_text = (
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
@@ -747,7 +762,6 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_file.name = f"case-report-{get_eat_now().strftime('%Y-%m')}.xlsx"
     await context.bot.send_document(chat_id=update.effective_chat.id, document=excel_file, caption=f"📊 *ATM Cases Report – {get_eat_now().strftime('%B %Y')}*\n\nThis report contains all ATM cases.", parse_mode="Markdown")
 
-# Helper Function for Bank Selection Keyboard
 def get_bank_selection_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏦 Awash Bank", callback_data="fbank_Awash"),
@@ -777,7 +791,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception: pass
         return
 
-    # DAILY REPORT MAIN MENU
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
         confirm_text = (
@@ -795,7 +808,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
         return
 
-    # TELEGRAM & PM SUB-MENU
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
         tgpm_text = (
@@ -813,7 +825,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
-    # CASE BUTTON PRESSED -> MANUAL CASE REGISTRATION FLOW
     if data.startswith("drpt_case_"):
         tech_name = data.split("_")[2]
         now_eat = get_eat_now()
@@ -838,7 +849,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # PM BUTTON PRESSED -> PREVENTIVE MAINTENANCE FLOW
     if data.startswith("drpt_pm_"):
         tech_name = data.split("_")[2]
         now_eat = get_eat_now()
@@ -863,7 +873,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # BANK SELECTION BUTTON HANDLER
     if data.startswith("fbank_"):
         selected_bank = data.split("fbank_")[1]
         if chat_id not in USER_FORM_STATES: return
@@ -883,8 +892,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    # DASHBOARD BUTTON HANDLER
-    # 💡 2. PENDING CASE የቆዩትንም ጨምሮ ሁሉንም፤ COMPLETED ከሆነ ደግሞ የዛሬውን ብቻ የሚያሳይ የማጣሪያ ማስተካከያ
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
         await query.edit_message_text("⏳ Syncing logs from dashboard portal...")
@@ -903,10 +910,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 c_date_str = c.get('date_obj').strftime("%d/%m/%Y") if c.get('date_obj') else c.get('reg_date')
                 c_closed_str = c.get('closed_date_obj').strftime("%d/%m/%Y") if c.get('closed_date_obj') else c.get('closed_date')
 
-                # ሀ) On going / Pending ከሆነ - መቼም የተመዘገበ ይሁን ይካተታል
                 if case_status in ["on going", "pending", "open"]:
                     filtered_cases.append(c)
-                # ለ) Completed ከሆነ - የዛሬ ብቻ ይካተታል
                 elif case_status in ["completed", "done"]:
                     if c_date_str == today_str or c_closed_str == today_str:
                         filtered_cases.append(c)
@@ -929,7 +934,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
-    # DASHBOARD CASE SELECTED - START FORM FLOW
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extracting data for Google Form mapping...")
@@ -956,7 +960,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 ENTRY_CLOSED_DATE: target_case['closed_date'],
                 ENTRY_CLOSED_TIME: target_case['closed_time'],
                 
-                # AUTOMATED FIELDS
                 ENTRY_TYPE2: 'case',
                 ENTRY_REG_TYPE: 'Dashboard',
             }
@@ -1034,7 +1037,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await render_summary_and_confirm(query.message, USER_FORM_STATES[chat_id])
         return
 
-    # GOOGLE FORM FINAL SUBMIT HANDLER
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Submitting data to Google Forms...")
@@ -1111,7 +1113,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
-# Helper function to display summary review before final submission
 async def render_summary_and_confirm(target_message, state_data):
     payload = state_data['extracted_payload']
     tech = state_data.get('tech_name', 'N/A')
@@ -1155,7 +1156,6 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     step = state_data.get('step')
     text = update.message.text.strip()
 
-    # CUSTOM BANK NAME TEXT INPUT
     if step == 'WAITING_FOR_CUSTOM_BANK_NAME':
         state_data['extracted_payload'][ENTRY_BANK] = text
         if state_data['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
@@ -1165,7 +1165,6 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    # CASE FLOW INPUTS
     if step == 'WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'ASK_TYPE'
@@ -1196,7 +1195,6 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await render_summary_and_confirm(update.message, state_data)
         return
 
-    # PM FLOW INPUTS
     if step == 'PM_WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'PREVIEW_READY'
