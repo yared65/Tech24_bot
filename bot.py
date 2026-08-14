@@ -28,39 +28,48 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
+# MAINTENANCE SWITCH
 MAINTENANCE_MODE = False 
 
+# ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
      "Girmaye Kelil", "Israel Aklilu",
      "Yared Girma", "Yohanis Getiye",
 ]
 
+# GOOGLE FORM URL
 FORM_URL = os.environ.get("GOOGLE_FORM_URL", "https://docs.google.com/forms/d/e/1FAIpQLSfJAWo1l6gNT2hFwnGZcf-ibX-8drfZLR_ww6JMx_yFZCEcGQ/formResponse")
 
+# REAL & UPDATED GOOGLE FORM ENTRY IDs
 ENTRY_EMAIL = "entry.111111111"             
-ENTRY_TECH_NAME = "entry.206490333"         
-ENTRY_BANK = "entry.2128913998"             
-ENTRY_BRANCH = "entry.1983056024"           
-ENTRY_DISTRICT = "entry.1132223049"         
-ENTRY_TYPE2 = "entry.1173614214"            
+ENTRY_TECH_NAME = "entry.206490333"         # Technician Name
+ENTRY_BANK = "entry.2128913998"             # Bank
+ENTRY_BRANCH = "entry.1983056024"           # Branch
+ENTRY_DISTRICT = "entry.1132223049"         # District
+ENTRY_TYPE2 = "entry.1173614214"            # pm / case
 
-ENTRY_CASE_ID = "entry.283120155"           
-ENTRY_TERMINAL_NO = "entry.1541091566"      
-ENTRY_CASE_ISSUE = "entry.1741675200"       
-ENTRY_REG_TYPE = "entry.1717551465"         
-ENTRY_CASE_TYPE = "entry.1287114682"        
-ENTRY_STATUS = "entry.1994644026"           
-ENTRY_SPARE_PART = "entry.106596101"        
-ENTRY_PART_NAME = "entry.1167440013"        
-ENTRY_COMMENT = "entry.38555627"           
+# CASE Specific Entry IDs
+ENTRY_CASE_ID = "entry.283120155"           # Case Id
+ENTRY_TERMINAL_NO = "entry.1541091566"      # Terminal No
+ENTRY_CASE_ISSUE = "entry.1741675200"       # Case Issue
+ENTRY_REG_TYPE = "entry.1717551465"         # Case Registration Type (Dashboard / Telegram)
+ENTRY_CASE_TYPE = "entry.1287114682"        # Type (phone / physical)
+ENTRY_STATUS = "entry.1994644026"           # Status (Completed / On going)
+ENTRY_SPARE_PART = "entry.106596101"        # Spare Part (Yes / No)
+ENTRY_PART_NAME = "entry.1167440013"        # Part Name
+ENTRY_COMMENT = "entry.38555627"           # Comment
 
+# Date & Time Fields
 ENTRY_REG_DATE = "entry.2081498177"
 ENTRY_REG_TIME = "entry.1802377317"
 ENTRY_CLOSED_DATE = "entry.1340570535"
 ENTRY_CLOSED_TIME = "entry.1091544422"
 
+# ETHIOPIA TIMEZONE CONFIGURATION (EAT = UTC+3)
+EAT_TIMEZONE = timezone(timedelta(hours=3))
+
 def get_eat_now():
-    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=3))).replace(tzinfo=None)
+    return datetime.now(EAT_TIMEZONE).replace(tzinfo=None)
 
 raw_chat_id = os.environ.get("NOTIFICATION_CHAT_ID", "")
 if raw_chat_id.startswith("-") or raw_chat_id.isdigit():
@@ -73,8 +82,10 @@ SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
 ACTIVE_USERS_TRACKER = set()
 
+# MULTI-STEP FORM STATE TRACKER
 USER_FORM_STATES = {}
 
+# GLOBAL HTTP CLIENT
 HTTP_CLIENT = httpx.AsyncClient(
     headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -89,7 +100,7 @@ HTTP_CLIENT = httpx.AsyncClient(
 )
 
 # ==========================================
-# 2. FLASK SERVER FOR KEEPALIVE
+# 2. FLASK SERVER FOR KEEPALIVE (RENDER)
 # ==========================================
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -106,7 +117,7 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST JSON FIELD EXTRACTORS & UTILS
+# 3. ROBUST JSON FIELD EXTRACTORS & PARSERS
 # ==========================================
 def safe_parse_json(val):
     if not val: return {}
@@ -136,18 +147,33 @@ def clean_extracted_value(data, key_hierarchy):
                 return str(v[key])
     return ""
 
-def parse_flexible_datetime(date_str):
-    if not date_str:
+def parse_api_date(date_raw_str):
+    """
+    Robust API date parsing function to prevent fallback to current time
+    """
+    if not date_raw_str or str(date_raw_str).strip().lower() in ["none", "null", "", "-", "undefined"]:
         return None
-    s = str(date_str).strip().replace("T", " ").replace("Z", "").split(".")[0]
+
+    clean_str = str(date_raw_str).strip().replace("T", " ").replace("Z", "")
+    # Remove millisecond trailing values if present
+    clean_str = clean_str.split(".")[0].strip()
+    # Remove timezone offsets (+03:00, etc.)
+    if "+" in clean_str:
+        clean_str = clean_str.split("+")[0].strip()
+
     formats = (
-        "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S", 
-        "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M",
-        "%Y-%m-%d", "%d/%m/%Y"
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %I:%M %p",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y"
     )
+
     for fmt in formats:
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(clean_str, fmt).replace(tzinfo=None)
         except ValueError:
             continue
     return None
@@ -158,25 +184,24 @@ def get_relative_time(date_obj):
     diff = now - date_obj
     seconds = diff.total_seconds()
     if seconds < 0:
-        return "Just now", "Just now"
+        minutes = abs(int(seconds // 60))
+        if minutes < 2: return "Just now", "Just now"
+        return f"{minutes}min", f"{minutes}min"
     minutes = int(seconds // 60)
     hours = int(minutes // 60)
     days = int(hours // 24)
     if days > 0: time_str = f"{days}d"
     elif hours > 0: time_str = f"{hours}h"
-    elif minutes > 0: time_str = f"{minutes}min"
-    else: time_str = "Just now"
+    else: time_str = f"{minutes}min"
     return time_str, time_str
 
 def find_matching_technician(dashboard_tech_name):
     if not dashboard_tech_name or str(dashboard_tech_name).strip().lower() in ["none", "not assigned", "-", "null"]:
         return None
-    # ደረቅ ስፔሶችን በሙሉ ያጸዳል (Multiple spaces clean up)
-    dash_clean = " ".join(str(dashboard_tech_name).split()).lower()
+    dash_clean = " ".join(str(dashboard_tech_name).strip().split()).lower()
     for tech in ALLOWED_TECHNICIANS:
-        tech_clean = " ".join(str(tech).split()).lower()
-        if tech_clean == dash_clean: 
-            return tech
+        tech_clean = " ".join(str(tech).strip().split()).lower()
+        if tech_clean == dash_clean: return tech
     return None
 
 # ==========================================
@@ -253,28 +278,30 @@ async def scrape_website_cases():
                 if not technician or str(technician).strip() == "" or str(technician).lower() == "none":
                     technician = "Not Assigned"
                 
-                # የተክኒሺያን ስም ከተጨማሪ ስፔሶች ይጸዳል
-                technician = " ".join(str(technician).split())
-
                 tech_phone = entry.get('assigned_phone', '-')
                 if not tech_phone: tech_phone = "-"
 
-                created_at = entry.get('created_at') or entry.get('Reported At') or entry.get('updated_at')
-                closed_at_raw = entry.get('closed_at') or entry.get('updated_at') or ""
+                # --- ROBUST CREATED_AT DATE PARSING FIX ---
+                created_at_raw = entry.get('created_at') or entry.get('Reported At') or entry.get('reported_at') or entry.get('created_date')
+                date_obj = parse_api_date(created_at_raw)
 
-                date_obj = parse_flexible_datetime(created_at)
                 if not date_obj:
+                    logger.warning(f"Could not parse created_at raw string '{created_at_raw}' for Case ID {case_id}. Falling back to EAT Now.")
                     date_obj = get_eat_now()
                 
                 date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
 
-                reg_date, reg_time = date_obj.strftime("%d/%m/%Y"), date_obj.strftime("%H:%M")
+                reg_date = date_obj.strftime("%d/%m/%Y")
+                reg_time = date_obj.strftime("%H:%M")
 
-                closed_date_obj = parse_flexible_datetime(closed_at_raw)
+                # --- CLOSED DATE PARSING ---
+                closed_at_raw = entry.get('closed_at') or entry.get('updated_at') or ""
+                closed_date_obj = parse_api_date(closed_at_raw)
+
+                closed_date, closed_time = ("-", "-")
                 if closed_date_obj:
-                    closed_date, closed_time = closed_date_obj.strftime("%d/%m/%Y"), closed_date_obj.strftime("%H:%M")
-                else:
-                    closed_date, closed_time = "-", "-"
+                    closed_date = closed_date_obj.strftime("%d/%m/%Y")
+                    closed_time = closed_date_obj.strftime("%H:%M")
 
                 status_raw = str(entry.get('callentry_status', '')).lower()
                 if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
@@ -355,7 +382,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
         time_diff = now - case_time
         hours_ago = int(time_diff.total_seconds() // 3600)
         mins_ago = int((time_diff.total_seconds() % 3600) // 60)
-        age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago" if mins_ago > 0 else "Just now"
+        age_str = f"{hours_ago}h {mins_ago}m ago" if hours_ago > 0 else f"{mins_ago}min ago"
 
         notif_text = (
             f"🚨 *ATM Incident Alert* 🚨\n"
@@ -388,7 +415,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
             if NOTIFICATION_CHAT_ID:
                 try: 
                     await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                except Exception as e:
+                except Exception as e: 
                     logger.warning(f"Could not send to NOTIFICATION_CHAT_ID: {str(e)}")
 
             for user_id in list(ACTIVE_USERS_TRACKER):
@@ -724,6 +751,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_file.name = f"case-report-{get_eat_now().strftime('%Y-%m')}.xlsx"
     await context.bot.send_document(chat_id=update.effective_chat.id, document=excel_file, caption=f"📊 *ATM Cases Report – {get_eat_now().strftime('%B %Y')}*\n\nThis report contains all ATM cases.", parse_mode="Markdown")
 
+# Helper Function for Bank Selection Keyboard
 def get_bank_selection_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏦 Awash Bank", callback_data="fbank_Awash"),
@@ -753,6 +781,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception: pass
         return
 
+    # DAILY REPORT MAIN MENU
     if data.startswith("dtech_"):
         tech_name = data.split("_")[1]
         confirm_text = (
@@ -770,6 +799,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=confirm_text, reply_markup=InlineKeyboardMarkup(confirm_keyboard), parse_mode="Markdown")
         return
 
+    # TELEGRAM & PM SUB-MENU
     if data.startswith("dtgpm_menu_"):
         tech_name = data.split("_")[2]
         tgpm_text = (
@@ -787,6 +817,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=tgpm_text, reply_markup=InlineKeyboardMarkup(tgpm_keyboard), parse_mode="Markdown")
         return
 
+    # CASE BUTTON PRESSED -> MANUAL CASE REGISTRATION FLOW
     if data.startswith("drpt_case_"):
         tech_name = data.split("_")[2]
         now_eat = get_eat_now()
@@ -811,6 +842,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    # PM BUTTON PRESSED -> PREVENTIVE MAINTENANCE FLOW
     if data.startswith("drpt_pm_"):
         tech_name = data.split("_")[2]
         now_eat = get_eat_now()
@@ -835,6 +867,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    # BANK SELECTION BUTTON HANDLER
     if data.startswith("fbank_"):
         selected_bank = data.split("fbank_")[1]
         if chat_id not in USER_FORM_STATES: return
@@ -854,33 +887,39 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
-    # DASHBOARD BUTTON HANDLER (የዛሬዎቹን ብቻ እንዲያሳይ ተስተካክሏል)
+    # DASHBOARD BUTTON HANDLER
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
-        await query.edit_message_text("⏳ Syncing daily logs from dashboard portal...")
+        await query.edit_message_text("⏳ Syncing weekly/daily logs from dashboard portal...")
         cases, status = await scrape_website_cases()
         if status != "OK": 
             return await query.edit_message_text(f"❌ API Sync Fail: {status}")
 
         now = get_eat_now()
-        today_str = now.strftime("%d/%m/%Y")
+        days_since_sunday = (now.weekday() + 1) % 7
+        start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
         filtered_cases = []
         for c in cases:
             matched_tech = find_matching_technician(c['technician'])
             if matched_tech and matched_tech.lower() == tech_name.lower():
                 c_date = c.get('date_obj')
-                # የዛሬ ተመዝግበው የዋሉትን ብቻ ይለያል
-                if c_date and c_date.strftime("%d/%m/%Y") == today_str:
+                c_closed_date = c.get('closed_date_obj')
+                
+                is_created_this_week = c_date and (start_of_week <= c_date <= end_of_week)
+                is_closed_this_week = c_closed_date and (start_of_week <= c_closed_date <= end_of_week)
+
+                if is_created_this_week or is_closed_this_week:
                     filtered_cases.append(c)
 
         if not filtered_cases:
             return await query.edit_message_text(
-                text=f"📭 *No dashboard cases found for {tech_name} today ({today_str}).*", 
+                text=f"📭 *No dashboard cases found for {tech_name} for this week (Sunday - Saturday).*", 
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]])
             )
 
-        text = f"📊 *Today's Dashboard Cases for {tech_name} ({today_str}):*\nSelect a case to initiate Google Form submission."
+        text = f"📊 *Dashboard Cases for {tech_name} (This Week):*\nSelect a case to initiate Google Form submission."
         
         keyboard = []
         for c in filtered_cases:
@@ -892,6 +931,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # DASHBOARD CASE SELECTED - START FORM FLOW
     if data.startswith("fcase_"):
         case_id = data.split("_")[1]
         await query.edit_message_text("⏳ Extracting data for Google Form mapping...")
@@ -918,6 +958,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 ENTRY_CLOSED_DATE: target_case['closed_date'],
                 ENTRY_CLOSED_TIME: target_case['closed_time'],
                 
+                # AUTOMATED FIELDS
                 ENTRY_TYPE2: 'case',
                 ENTRY_REG_TYPE: 'Dashboard',
             }
@@ -995,6 +1036,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await render_summary_and_confirm(query.message, USER_FORM_STATES[chat_id])
         return
 
+    # GOOGLE FORM FINAL SUBMIT HANDLER
     if data == "f_final_submit":
         if chat_id not in USER_FORM_STATES: return
         await query.edit_message_text("🚀 Submitting data to Google Forms...")
@@ -1021,14 +1063,9 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data.startswith("wrep_"):
         tech_name = data.split("_")[1]
-        await query.edit_message_text("⏳ Syncing weekly performance data...")
-        cases, status = await scrape_website_cases()
-        if status != "OK":
-            return await query.edit_message_text(f"❌ Failed to fetch report data: {status}")
-
-        report_text = format_technician_weekly_report(cases, tech_name)
+        cases, _ = await scrape_website_cases()
         await query.edit_message_text(
-            text=report_text,
+            text=format_technician_weekly_report(cases, tech_name),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to List", callback_data="back_to_techs")]
             ]),
@@ -1076,6 +1113,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
+# Helper function to display summary review before final submission
 async def render_summary_and_confirm(target_message, state_data):
     payload = state_data['extracted_payload']
     tech = state_data.get('tech_name', 'N/A')
@@ -1119,6 +1157,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     step = state_data.get('step')
     text = update.message.text.strip()
 
+    # CUSTOM BANK NAME TEXT INPUT
     if step == 'WAITING_FOR_CUSTOM_BANK_NAME':
         state_data['extracted_payload'][ENTRY_BANK] = text
         if state_data['extracted_payload'].get(ENTRY_TYPE2) == 'pm':
@@ -1128,6 +1167,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("🏢 *Please enter the Branch Name:*", parse_mode="Markdown")
         return
 
+    # CASE FLOW INPUTS
     if step == 'WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'ASK_TYPE'
@@ -1158,6 +1198,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await render_summary_and_confirm(update.message, state_data)
         return
 
+    # PM FLOW INPUTS
     if step == 'PM_WAITING_FOR_BRANCH_NAME':
         state_data['extracted_payload'][ENTRY_BRANCH] = text
         state_data['step'] = 'PREVIEW_READY'
