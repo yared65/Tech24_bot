@@ -28,9 +28,8 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# MAINTENANCE SWITCH & TRACKER
-MAINTENANCE_MODE = True  
-MAINTENANCE_ALERT_SENT = True
+# MAINTENANCE SWITCH
+MAINTENANCE_MODE = False  # Set to True to trigger Maintenance Mode Alert to all users
 
 # ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
@@ -116,7 +115,33 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 # ==========================================
-# 3. ROBUST JSON FIELD EXTRACTORS
+# 3. MAINTENANCE ALERT BROADCASTER
+# ==========================================
+def get_maintenance_message():
+    return (
+        "🚨 *SYSTEM NOTICE / MAINTENANCE ALERT* 🚨\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚠️ *For All bot users!!!*\n"
+        "The bot is currently under maintenance. We are performing system optimizations. Please be patient 🙏 Thank you for understanding.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🛠️ _Status: Upgrading systems & optimization ongoing_"
+    )
+
+async def send_maintenance_alert_to_all(bot):
+    """Broadcasting Maintenance message to all active users when enabled"""
+    message = get_maintenance_message()
+    targets = set(ACTIVE_USERS_TRACKER)
+    if NOTIFICATION_CHAT_ID:
+        targets.add(NOTIFICATION_CHAT_ID)
+
+    for user_id in targets:
+        try:
+            await bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Could not send maintenance alert to user {user_id}: {str(e)}")
+
+# ==========================================
+# 4. ROBUST JSON FIELD EXTRACTORS & HELPERS
 # ==========================================
 def safe_parse_json(val):
     if not val: return {}
@@ -173,7 +198,7 @@ def find_matching_technician(dashboard_tech_name):
     return None
 
 # ==========================================
-# 4. API SCRAPER
+# 5. API SCRAPER
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -256,11 +281,16 @@ async def scrape_website_cases():
                 if created_at:
                     date_str = str(created_at).strip()
                     formats_to_try = (
-                        "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M:%S %p",
-                        "%d/%m/%Y %I:%M %p", "%d/%m/%Y %I:%M:%S %p",
-                        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-                        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", 
-                        "%d/%m/%Y", "%Y-%m-%d"
+                        "%Y-%m-%d %I:%M %p",       # 2026-08-14 04:57 PM
+                        "%Y-%m-%d %I:%M:%S %p",    # 2026-08-14 04:57:00 PM
+                        "%d/%m/%Y %I:%M %p",       # 14/08/2026 04:57 PM
+                        "%d/%m/%Y %I:%M:%S %p",    # 14/08/2026 04:57:00 PM
+                        "%d/%m/%Y %H:%M:%S", 
+                        "%d/%m/%Y %H:%M",
+                        "%Y-%m-%d %H:%M:%S", 
+                        "%Y-%m-%dT%H:%M:%S", 
+                        "%d/%m/%Y", 
+                        "%Y-%m-%d"
                     )
                     clean_time_str = date_str.split(".")[0].replace("T", " ")
                     for fmt in formats_to_try:
@@ -353,7 +383,7 @@ async def terminate_case_on_dashboard(case_id):
         return False, str(e)
 
 # ==========================================
-# 5. AUTOMATIC ALARM & OVERDUE LOOP
+# 6. AUTOMATIC ALARM & OVERDUE LOOP
 # ==========================================
 async def check_and_alert_cases(bot, target_user_id=None):
     cases, status = await scrape_website_cases()
@@ -447,48 +477,15 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     except Exception as e: 
                         logger.warning(f"Failed to send overdue reminder to individual user {user_id}: {str(e)}")
 
-# 💡 💡 MAINTENANCE ALERT SENDER LOOP 💡 💡
 async def start_independent_alarm_loop(bot):
-    global MAINTENANCE_ALERT_SENT
     logger.info("Background Alarm Engine successfully launched inside Application Loop.")
-    
     while True:
         try:
-            if MAINTENANCE_MODE:
-                if not MAINTENANCE_ALERT_SENT:
-                    m_msg = get_maintenance_message()
-                    
-                    if NOTIFICATION_CHAT_ID:
-                        try:
-                            await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=m_msg, parse_mode="Markdown")
-                        except Exception as e:
-                            logger.error(f"Failed to send maintenance alert to NOTIFICATION_CHAT_ID: {e}")
-
-                    for user_id in list(ACTIVE_USERS_TRACKER):
-                        try:
-                            await bot.send_message(chat_id=user_id, text=m_msg, parse_mode="Markdown")
-                        except Exception as e:
-                            logger.warning(f"Failed to send maintenance alert to user {user_id}: {e}")
-
-                    MAINTENANCE_ALERT_SENT = True
-            else:
-                MAINTENANCE_ALERT_SENT = False
+            if not MAINTENANCE_MODE:
                 await check_and_alert_cases(bot)
-                
         except Exception as e:
             logger.error(f"Error inside independent background loop: {str(e)}")
-            
         await asyncio.sleep(20)
-
-def get_maintenance_message():
-    return (
-        "🚨 *SYSTEM NOTICE / MAINTENANCE ALERT* 🚨\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚠️ *For All bot users!!!*\n"
-        "The bot is currently under maintenance. We are performing system optimizations. Please be patient 🙏 Thank you for understanding.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🛠️ _Status: Upgrading systems & optimization ongoing_"
-    )
 
 def build_case_detail_ui(case):
     relative_long, _ = get_relative_time(case.get('date_obj'))
@@ -688,7 +685,9 @@ def generate_excel_bytes(cases):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ACTIVE_USERS_TRACKER.add(chat_id)
-    if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
+
+    if MAINTENANCE_MODE: 
+        return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
 
     welcome_text = (
         "👋 *Welcome to Tech24 Adama District Bot*\n\n"
@@ -762,6 +761,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_file.name = f"case-report-{get_eat_now().strftime('%Y-%m')}.xlsx"
     await context.bot.send_document(chat_id=update.effective_chat.id, document=excel_file, caption=f"📊 *ATM Cases Report – {get_eat_now().strftime('%B %Y')}*\n\nThis report contains all ATM cases.", parse_mode="Markdown")
 
+# Helper Function for Bank Selection Keyboard
 def get_bank_selection_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏦 Awash Bank", callback_data="fbank_Awash"),
@@ -1113,6 +1113,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
+# Helper function to display summary review before final submission
 async def render_summary_and_confirm(target_message, state_data):
     payload = state_data['extracted_payload']
     tech = state_data.get('tech_name', 'N/A')
@@ -1202,7 +1203,7 @@ async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
 # ==========================================
-# 11. STARTUP MENU INITIALIZER
+# 11. STARTUP MENU & ALERT INITIALIZER
 # ==========================================
 async def post_init(application: Application) -> None:
     commands = [
@@ -1214,6 +1215,11 @@ async def post_init(application: Application) -> None:
         BotCommand("export", "Generate incident logs Excel sheet")
     ]
     await application.bot.set_my_commands(commands)
+    
+    # 💡 MAINTENANCE MODE True ከሆነ Startup ላይ ወዲያውኑ Alert ይልካል
+    if MAINTENANCE_MODE:
+        asyncio.create_task(send_maintenance_alert_to_all(application.bot))
+
     asyncio.create_task(start_independent_alarm_loop(application.bot))
 
 # ==========================================
