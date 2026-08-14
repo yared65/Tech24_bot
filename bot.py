@@ -172,7 +172,7 @@ def find_matching_technician(dashboard_tech_name):
     return None
 
 # ==========================================
-# 4. API SCRAPER (UPDATED FOR AM/PM FORMAT)
+# 4. API SCRAPER (UPDATED TIME FORMAT)
 # ==========================================
 async def scrape_website_cases():
     if not EMAIL or not PASSWORD:
@@ -254,7 +254,6 @@ async def scrape_website_cases():
                 date_obj = None
                 if created_at:
                     date_str = str(created_at).strip()
-                    # 💡 AM/PM ፎርማቶችን ያካተቱ የጊዜ አይነቶች
                     formats_to_try = (
                         "%Y-%m-%d %I:%M %p",       # 2026-08-14 04:57 PM
                         "%Y-%m-%d %I:%M:%S %p",    # 2026-08-14 04:57:00 PM
@@ -276,19 +275,16 @@ async def scrape_website_cases():
                             
                 if not date_obj:
                     date_obj = get_eat_now()
-                    date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
-                else:
-                    date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
 
-                reg_date, reg_time = ("-", "-")
-                if date_str and " " in date_str:
-                    reg_date, reg_time = date_str.split(" ")[0], date_str.split(" ")[1][:5]
+                # 💡 1. Registered time በ 12-Hour (AM/PM) format እንዲሆን ተደርጓል
+                reg_date = date_obj.strftime("%d/%m/%Y")
+                reg_time = date_obj.strftime("%I:%M %p")
+                date_str = f"{reg_date} {reg_time}"
 
                 closed_date, closed_time = ("-", "-")
                 closed_date_obj = None
                 if closed_at_raw and " " in str(closed_at_raw):
                     c_str = str(closed_at_raw).split(".")[0].replace("T", " ")
-                    closed_date, closed_time = c_str.split(" ")[0], c_str.split(" ")[1][:5]
                     for fmt in (
                         "%Y-%m-%d %I:%M %p", "%d/%m/%Y %I:%M %p",
                         "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", 
@@ -298,6 +294,9 @@ async def scrape_website_cases():
                             closed_date_obj = datetime.strptime(c_str, fmt).replace(tzinfo=None)
                             break
                         except ValueError: pass
+                    if closed_date_obj:
+                        closed_date = closed_date_obj.strftime("%d/%m/%Y")
+                        closed_time = closed_date_obj.strftime("%I:%M %p")
 
                 status_raw = str(entry.get('callentry_status', '')).lower()
                 if status_raw in ["complete", "completed", "done", "1"]: status_text = "Completed"
@@ -411,7 +410,7 @@ async def check_and_alert_cases(bot, target_user_id=None):
             if NOTIFICATION_CHAT_ID:
                 try: 
                     await bot.send_message(chat_id=NOTIFICATION_CHAT_ID, text=notif_text, reply_markup=kb, parse_mode="Markdown")
-                except Exception as e:
+                except Exception as e: 
                     logger.warning(f"Could not send to NOTIFICATION_CHAT_ID: {str(e)}")
 
             for user_id in list(ACTIVE_USERS_TRACKER):
@@ -485,7 +484,7 @@ def build_case_detail_ui(case):
         f"District: {case['district']}\n"
         f"Comment: {case['comment']}\n"
         f"Technician: {case['technician']}\n"
-        f"Reported At: {case['date_obj'].strftime('%d/%m/%Y %H:%M:%S') if case.get('date_obj') else case['date_raw']} (EAT)\n"
+        f"Reported At: {case['date_raw']} (EAT)\n"
         f"Relative Time: {relative_long}"
     )
     keyboard = [
@@ -557,12 +556,10 @@ def format_technician_weekly_report(cases, selected_tech):
     report_lines = [f"📋 *Adama District Weekly Cases Report - {selected_tech}* 📋\n"]
 
     for idx, c in enumerate(filtered_cases, start=1):
-        reg_datetime_str = c['date_obj'].strftime("%d/%m/%Y %H:%M") if c.get('date_obj') else c.get('date_raw', '-')
+        reg_datetime_str = c.get('date_raw', '-')
         
         if c.get('status') == "Completed":
-            if c.get('closed_date_obj'):
-                closed_str = c['closed_date_obj'].strftime("%d/%m/%Y %H:%M")
-            elif c.get('closed_date') != "-" and c.get('closed_time') != "-":
+            if c.get('closed_date') != "-" and c.get('closed_time') != "-":
                 closed_str = f"{c['closed_date']} {c['closed_time']}"
             else:
                 closed_str = "Completed (No timestamp)"
@@ -830,12 +827,12 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 ENTRY_REG_TYPE: 'Telegram',
                 ENTRY_DISTRICT: 'Adama',
                 ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y"),
-                ENTRY_REG_TIME: now_eat.strftime("%H:%M")
+                ENTRY_REG_TIME: now_eat.strftime("%I:%M %p")
             }
         }
         
         await query.edit_message_text(
-            text=f"📋 *New Case Registration Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %H:%M')}` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
+            text=f"📋 *New Case Registration Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %I:%M %p')}` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
             reply_markup=get_bank_selection_keyboard(),
             parse_mode="Markdown"
         )
@@ -855,12 +852,12 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 ENTRY_STATUS: 'Completed',
                 ENTRY_DISTRICT: 'Adama',
                 ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y"),
-                ENTRY_REG_TIME: now_eat.strftime("%H:%M")
+                ENTRY_REG_TIME: now_eat.strftime("%I:%M %p")
             }
         }
         
         await query.edit_message_text(
-            text=f"⚙️ *New PM (Preventive Maintenance) Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %H:%M')}` (Auto-inserted)\n📌 Status: `Completed` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
+            text=f"⚙️ *New PM (Preventive Maintenance) Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %I:%M %p')}` (Auto-inserted)\n📌 Status: `Completed` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
             reply_markup=get_bank_selection_keyboard(),
             parse_mode="Markdown"
         )
@@ -887,38 +884,40 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # DASHBOARD BUTTON HANDLER
+    # 💡 2. PENDING CASE የቆዩትንም ጨምሮ ሁሉንም፤ COMPLETED ከሆነ ደግሞ የዛሬውን ብቻ የሚያሳይ የማጣሪያ ማስተካከያ
     if data.startswith("ddash_"):
         tech_name = data.split("_")[1]
-        await query.edit_message_text("⏳ Syncing weekly/daily logs from dashboard portal...")
+        await query.edit_message_text("⏳ Syncing logs from dashboard portal...")
         cases, status = await scrape_website_cases()
         if status != "OK": 
             return await query.edit_message_text(f"❌ API Sync Fail: {status}")
 
         now = get_eat_now()
-        days_since_sunday = (now.weekday() + 1) % 7
-        start_of_week = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        today_str = now.strftime("%d/%m/%Y")
 
         filtered_cases = []
         for c in cases:
             matched_tech = find_matching_technician(c['technician'])
             if matched_tech and matched_tech.lower() == tech_name.lower():
-                c_date = c.get('date_obj')
-                c_closed_date = c.get('closed_date_obj')
-                
-                is_created_this_week = c_date and (start_of_week <= c_date <= end_of_week)
-                is_closed_this_week = c_closed_date and (start_of_week <= c_closed_date <= end_of_week)
+                case_status = str(c.get('status', '')).lower()
+                c_date_str = c.get('date_obj').strftime("%d/%m/%Y") if c.get('date_obj') else c.get('reg_date')
+                c_closed_str = c.get('closed_date_obj').strftime("%d/%m/%Y") if c.get('closed_date_obj') else c.get('closed_date')
 
-                if is_created_this_week or is_closed_this_week:
+                # ሀ) On going / Pending ከሆነ - መቼም የተመዘገበ ይሁን ይካተታል
+                if case_status in ["on going", "pending", "open"]:
                     filtered_cases.append(c)
+                # ለ) Completed ከሆነ - የዛሬ ብቻ ይካተታል
+                elif case_status in ["completed", "done"]:
+                    if c_date_str == today_str or c_closed_str == today_str:
+                        filtered_cases.append(c)
 
         if not filtered_cases:
             return await query.edit_message_text(
-                text=f"📭 *No dashboard cases found for {tech_name} for this week (Sunday - Saturday).*", 
+                text=f"📭 *No active pending cases or today's completed cases found for {tech_name}.*", 
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")]])
             )
 
-        text = f"📊 *Dashboard Cases for {tech_name} (This Week):*\nSelect a case to initiate Google Form submission."
+        text = f"📊 *Dashboard Cases for {tech_name}:*\n_(Showing all Pending cases + Today's Completed cases)_"
         
         keyboard = []
         for c in filtered_cases:
@@ -927,7 +926,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"fcase_{c['case_id']}")])
 
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"dtech_{tech_name}")])
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
     # DASHBOARD CASE SELECTED - START FORM FLOW
