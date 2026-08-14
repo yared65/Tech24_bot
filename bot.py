@@ -281,21 +281,34 @@ async def scrape_website_cases():
                 tech_phone = entry.get('assigned_phone', '-')
                 if not tech_phone: tech_phone = "-"
 
-                # --- ROBUST CREATED_AT DATE PARSING FIX ---
-                created_at_raw = entry.get('created_at') or entry.get('Reported At') or entry.get('reported_at') or entry.get('created_date')
+                # --- ORIGINAL CREATION TIME FIX ---
+                # Prioritize original created_at over updated_at / assignment timestamps
+                created_at_raw = (
+                    entry.get('created_at') or 
+                    entry.get('created_date') or 
+                    entry.get('reported_at') or 
+                    entry.get('Reported At')
+                )
+                if isinstance(created_at_raw, dict):
+                    created_at_raw = created_at_raw.get('date') or created_at_raw.get('created_at')
+
                 date_obj = parse_api_date(created_at_raw)
+
+                if not date_obj:
+                    # Fallback to updated_at only if creation date is missing
+                    fallback_raw = entry.get('updated_at')
+                    date_obj = parse_api_date(fallback_raw)
 
                 if not date_obj:
                     logger.warning(f"Could not parse created_at raw string '{created_at_raw}' for Case ID {case_id}. Falling back to EAT Now.")
                     date_obj = get_eat_now()
                 
                 date_str = date_obj.strftime("%d/%m/%Y %H:%M:%S")
-
                 reg_date = date_obj.strftime("%d/%m/%Y")
                 reg_time = date_obj.strftime("%H:%M")
 
                 # --- CLOSED DATE PARSING ---
-                closed_at_raw = entry.get('closed_at') or entry.get('updated_at') or ""
+                closed_at_raw = entry.get('closed_at') or ""
                 closed_date_obj = parse_api_date(closed_at_raw)
 
                 closed_date, closed_time = ("-", "-")
