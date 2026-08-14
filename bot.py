@@ -28,8 +28,33 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
-# MAINTENANCE SWITCH
-MAINTENANCE_MODE = False  # Set to True to trigger Maintenance Mode Alert to all users
+# 🚨 MAINTENANCE SWITCH (Set to True to trigger Alert)
+MAINTENANCE_MODE = True  
+
+# USER TRACKER FILE (Persistent storage)
+USERS_FILE = "registered_users.txt"
+
+def load_saved_users():
+    """ያለፉትን ተጠቃሚዎች ID ከፋይል ያነባል"""
+    if not os.path.exists(USERS_FILE):
+        return set()
+    try:
+        with open(USERS_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        logger.error(f"Error loading users: {e}")
+        return set()
+
+def save_user_id(user_id):
+    """አዲስ ተጠቃሚ ሲመጣ ID-ዉን ፋይል ውስጥ ያስቀምጣል"""
+    str_id = str(user_id)
+    users = load_saved_users()
+    if str_id not in users:
+        try:
+            with open(USERS_FILE, "a") as f:
+                f.write(f"{str_id}\n")
+        except Exception as e:
+            logger.error(f"Error saving user: {e}")
 
 # ALLOWED TECHNICIANS
 ALLOWED_TECHNICIANS = [
@@ -78,7 +103,7 @@ else:
 
 SENT_CASES_TRACKER = set()
 SENT_REMINDERS_TRACKER = {}
-ACTIVE_USERS_TRACKER = set()
+ACTIVE_USERS_TRACKER = load_saved_users()
 
 # MULTI-STEP FORM STATE TRACKER
 USER_FORM_STATES = {}
@@ -128,15 +153,17 @@ def get_maintenance_message():
     )
 
 async def send_maintenance_alert_to_all(bot):
-    """Broadcasting Maintenance message to all active users when enabled"""
+    """Broadcasting Maintenance message to all saved users when enabled"""
     message = get_maintenance_message()
-    targets = set(ACTIVE_USERS_TRACKER)
+    targets = load_saved_users()
+    
     if NOTIFICATION_CHAT_ID:
-        targets.add(NOTIFICATION_CHAT_ID)
+        targets.add(str(NOTIFICATION_CHAT_ID))
 
     for user_id in targets:
         try:
-            await bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+            await bot.send_message(chat_id=int(user_id), text=message, parse_mode="Markdown")
+            logger.info(f"Maintenance alert successfully sent to {user_id}")
         except Exception as e:
             logger.warning(f"Could not send maintenance alert to user {user_id}: {str(e)}")
 
@@ -438,9 +465,9 @@ async def check_and_alert_cases(bot, target_user_id=None):
                 except Exception as e: 
                     logger.warning(f"Could not send to NOTIFICATION_CHAT_ID: {str(e)}")
 
-            for user_id in list(ACTIVE_USERS_TRACKER):
+            for user_id in load_saved_users():
                 try: 
-                    await bot.send_message(chat_id=user_id, text=notif_text, reply_markup=kb, parse_mode="Markdown")
+                    await bot.send_message(chat_id=int(user_id), text=notif_text, reply_markup=kb, parse_mode="Markdown")
                 except Exception: 
                     pass
             continue
@@ -471,9 +498,9 @@ async def check_and_alert_cases(bot, target_user_id=None):
                     except Exception as e: 
                         logger.error(f"Failed to send overdue reminder to NOTIFICATION_CHAT_ID: {str(e)}")
                 
-                for user_id in list(ACTIVE_USERS_TRACKER):
+                for user_id in load_saved_users():
                     try: 
-                        await bot.send_message(chat_id=user_id, text=reminder_text, reply_markup=kb, parse_mode="Markdown")
+                        await bot.send_message(chat_id=int(user_id), text=reminder_text, reply_markup=kb, parse_mode="Markdown")
                     except Exception as e: 
                         logger.warning(f"Failed to send overdue reminder to individual user {user_id}: {str(e)}")
 
@@ -684,7 +711,7 @@ def generate_excel_bytes(cases):
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    ACTIVE_USERS_TRACKER.add(chat_id)
+    save_user_id(chat_id)  # Save persistent user ID
 
     if MAINTENANCE_MODE: 
         return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
@@ -703,6 +730,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_and_alert_cases(context.bot, target_user_id=chat_id)
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user_id(update.effective_chat.id)
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
@@ -725,18 +753,21 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user_id(update.effective_chat.id)
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"dtech_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text("📋 *Daily Report Menu*\n\n 👥 Please select an Adama District Technician:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user_id(update.effective_chat.id)
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
     await update.message.reply_text("📊 *Weekly Report Menu*\n\n 👥 Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user_id(update.effective_chat.id)
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Searching dashboard portal for Adama logs, please wait...")
     cases, status = await scrape_website_cases()
@@ -747,6 +778,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_weekly_summary_matrix(cases), parse_mode="Markdown")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user_id(update.effective_chat.id)
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     processing = await update.message.reply_text("⏳ Writing and formatting Excel spreadsheet...")
     cases, status = await scrape_website_cases()
@@ -778,6 +810,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
+    save_user_id(chat_id)
 
     if MAINTENANCE_MODE:
         await context.bot.send_message(chat_id=chat_id, text=get_maintenance_message(), parse_mode="Markdown")
@@ -1151,6 +1184,7 @@ async def render_summary_and_confirm(target_message, state_data):
 # ==========================================
 async def message_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    save_user_id(chat_id)
     if chat_id not in USER_FORM_STATES: return
 
     state_data = USER_FORM_STATES[chat_id]
