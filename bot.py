@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-EMAIL = os.environ.get("EMAIL")
+EMAIL = os.environ.get("EMAIL", "yaredgirma65@gmail.com")
 PASSWORD = os.environ.get("PASSWORD")
 
 # 🚨 MAINTENANCE SWITCH (Set to True to trigger Alert)
@@ -77,7 +77,7 @@ ENTRY_TYPE2 = "entry.1173614214"            # pm / case
 ENTRY_CASE_ID = "entry.283120155"           # Case Id
 ENTRY_TERMINAL_NO = "entry.1541091566"      # Terminal No
 ENTRY_CASE_ISSUE = "entry.1741675200"       # Case Issue
-ENTRY_REG_TYPE = "entry.1717551465"         # Case Registration Type (Dashboard / Telegram)
+ENTRY_REG_TYPE = "entry.1717551465"         # Registration Type (Dashboard / Telegram / PM)
 ENTRY_CASE_TYPE = "entry.1287114682"        # Type (phone / physical)
 ENTRY_STATUS = "entry.1994644026"           # Status (Completed / On going)
 ENTRY_SPARE_PART = "entry.106596101"        # Spare Part (Yes / No)
@@ -711,7 +711,7 @@ def generate_excel_bytes(cases):
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    save_user_id(chat_id)  # Save persistent user ID
+    save_user_id(chat_id)
 
     if MAINTENANCE_MODE: 
         return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
@@ -803,6 +803,46 @@ def get_bank_selection_keyboard():
         [InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_action")]
     ])
 
+# Helper function to display summary review before final submission
+async def render_summary_and_confirm(target_message, state_data):
+    payload = state_data['extracted_payload']
+    tech = state_data.get('tech_name', 'N/A')
+    
+    is_pm = payload.get(ENTRY_TYPE2) == 'pm'
+    
+    if is_pm:
+        date_display = payload.get(ENTRY_REG_DATE, '-')
+    else:
+        date_display = f"{payload.get(ENTRY_REG_DATE, '-')} {payload.get(ENTRY_REG_TIME, '-')}"
+
+    summary_msg = (
+        f"📋 *Form Submission Review ({tech})* 📋\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Date/Time: {date_display}\n"
+        f"🏷️ Registration Type: {payload.get(ENTRY_REG_TYPE, 'N/A')}\n"
+        f"🏦 Bank Name: {payload.get(ENTRY_BANK, '-')}\n"
+        f"🏢 Branch Name: {payload.get(ENTRY_BRANCH, '-')}\n"
+    )
+    
+    if not is_pm:
+        summary_msg += (
+            f"📞 Support Type: {payload.get(ENTRY_CASE_TYPE, '-')}\n"
+            f"⚠️ Issue: {payload.get(ENTRY_CASE_ISSUE, '-')}\n"
+            f"🔩 Spare Used: {payload.get(ENTRY_SPARE_PART, '-')}\n"
+            f"🏷️ Part Name: {payload.get(ENTRY_PART_NAME, '-')}\n"
+            f"📌 Status: {payload.get(ENTRY_STATUS, '-')}\n"
+        )
+    else:
+        summary_msg += f"📌 Status: {payload.get(ENTRY_STATUS, 'Completed')}\n"
+        
+    summary_msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    confirm_kb = [
+        [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")]
+    ]
+    await target_message.reply_text(summary_msg, reply_markup=InlineKeyboardMarkup(confirm_kb), parse_mode="Markdown")
+
 # ==========================================
 # 9. INLINE BUTTON CALLBACK HANDLER
 # ==========================================
@@ -866,6 +906,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'SELECT_BANK_NAME',
             'tech_name': tech_name,
             'extracted_payload': {
+                ENTRY_EMAIL: EMAIL.strip() if EMAIL else "yaredgirma65@gmail.com",
                 ENTRY_TECH_NAME: tech_name,
                 ENTRY_TYPE2: 'case',
                 ENTRY_REG_TYPE: 'Telegram',
@@ -890,17 +931,18 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'PM_SELECT_BANK_NAME',
             'tech_name': tech_name,
             'extracted_payload': {
+                ENTRY_EMAIL: EMAIL.strip() if EMAIL else "yaredgirma65@gmail.com",
                 ENTRY_TECH_NAME: tech_name,
                 ENTRY_TYPE2: 'pm',
-                ENTRY_STATUS: 'Completed',
-                ENTRY_DISTRICT: 'Adama',
-                ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y"),
-                ENTRY_REG_TIME: now_eat.strftime("%I:%M %p")
+                ENTRY_REG_TYPE: 'PM',              # Set registration type to PM
+                ENTRY_STATUS: 'Completed',          # Always Completed for PM
+                ENTRY_DISTRICT: 'Adama',            # Default Adama
+                ENTRY_REG_DATE: now_eat.strftime("%d/%m/%Y") # Date only (No time)
             }
         }
         
         await query.edit_message_text(
-            text=f"⚙️ *New PM (Preventive Maintenance) Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y %I:%M %p')}` (Auto-inserted)\n📌 Status: `Completed` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
+            text=f"⚙️ *New PM (Preventive Maintenance) Form ({tech_name})*\n📅 Date: `{now_eat.strftime('%d/%m/%Y')}` (Auto-inserted)\n📌 Status: `Completed` (Auto-inserted)\n\n🏦 *Please select the Bank Name:*", 
             reply_markup=get_bank_selection_keyboard(),
             parse_mode="Markdown"
         )
@@ -980,6 +1022,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             'step': 'ASK_TYPE',
             'tech_name': target_case['technician'],
             'extracted_payload': {
+                ENTRY_EMAIL: EMAIL.strip() if EMAIL else "yaredgirma65@gmail.com",
                 ENTRY_TECH_NAME: target_case['technician'],
                 ENTRY_CASE_ID: target_case['case_id'],
                 ENTRY_TERMINAL_NO: target_case['terminal'],
@@ -1146,39 +1189,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text, kb = build_case_detail_ui(target)
         await query.edit_message_text(text, reply_markup=kb)
 
-# Helper function to display summary review before final submission
-async def render_summary_and_confirm(target_message, state_data):
-    payload = state_data['extracted_payload']
-    tech = state_data.get('tech_name', 'N/A')
-    
-    summary_msg = (
-        f"📋 *Form Submission Review ({tech})* 📋\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📅 Date/Time: {payload.get(ENTRY_REG_DATE, '-')} {payload.get(ENTRY_REG_TIME, '-')}\n"
-        f"🏷️ Registration Type: {payload.get(ENTRY_REG_TYPE, 'N/A')}\n"
-        f"🏦 Bank Name: {payload.get(ENTRY_BANK, '-')}\n"
-        f"🏢 Branch Name: {payload.get(ENTRY_BRANCH, '-')}\n"
-    )
-    
-    if payload.get(ENTRY_TYPE2) == 'case':
-        summary_msg += (
-            f"📞 Support Type: {payload.get(ENTRY_CASE_TYPE, '-')}\n"
-            f"⚠️ Issue: {payload.get(ENTRY_CASE_ISSUE, '-')}\n"
-            f"🔩 Spare Used: {payload.get(ENTRY_SPARE_PART, '-')}\n"
-            f"🏷️ Part Name: {payload.get(ENTRY_PART_NAME, '-')}\n"
-            f"📌 Status: {payload.get(ENTRY_STATUS, '-')}\n"
-        )
-    else:
-        summary_msg += f"📌 Status: {payload.get(ENTRY_STATUS, 'Completed')}\n"
-        
-    summary_msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    confirm_kb = [
-        [InlineKeyboardButton("🚀 Submit Form", callback_data="f_final_submit")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")]
-    ]
-    await target_message.reply_text(summary_msg, reply_markup=InlineKeyboardMarkup(confirm_kb), parse_mode="Markdown")
-
 # ==========================================
 # 10. TEXT MESSAGE HANDLER FOR FORMS INPUT
 # ==========================================
@@ -1250,7 +1260,6 @@ async def post_init(application: Application) -> None:
     ]
     await application.bot.set_my_commands(commands)
     
-    # 💡 MAINTENANCE MODE True ከሆነ Startup ላይ ወዲያውኑ Alert ይልካል
     if MAINTENANCE_MODE:
         asyncio.create_task(send_maintenance_alert_to_all(application.bot))
 
