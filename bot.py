@@ -602,9 +602,9 @@ def format_technician_weekly_report(cases, selected_tech):
                 closed_str = f"{c['closed_date']} {c['closed_time']}"
             else:
                 closed_str = "Completed (No timestamp)"
-            status_line = f"📌 Status: ✅ Completed\n✅ Closed: {closed_str}"
+            status_line = f"📌 Status:  Completed\n✅ Closed: {closed_str}"
         else:
-            status_line = "📌 Status: ⏳ On going"
+            status_line = "📌 Status: On going"
 
         line = (
             f"{idx}. ID: {c['case_id']}\n"
