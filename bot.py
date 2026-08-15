@@ -29,7 +29,7 @@ EMAIL = os.environ.get("EMAIL")
 PASSWORD = os.environ.get("PASSWORD")
 
 # 🚨 MAINTENANCE SWITCH (Set to True to trigger Alert)
-MAINTENANCE_MODE = True  
+MAINTENANCE_MODE = False  
 
 # USER TRACKER FILE (Persistent storage)
 USERS_FILE = "registered_users.txt"
