@@ -657,7 +657,7 @@ def format_weekly_summary_matrix(cases):
 
     for tech in ALLOWED_TECHNICIANS:
         stats = tech_stats[tech]
-        report_lines.append(f" 👤 Technician *{tech\n}*: {stats['completed']} completed,\n {stats['ongoing']} ongoing.\n")
+        report_lines.append(f" 👤 Technician *{tech}*:\n {stats['completed']} completed,\n {stats['ongoing']} ongoing.\n")
 
     report_lines.append(f"\n 🟧 Total in *Adama District*: {total_completed} completed, {total_ongoing} ongoing cases.")
     if other_district_or_unassigned > 0: report_lines.append(f" 🔍 Unassigned / Other District Cases: *{other_district_or_unassigned}*")
