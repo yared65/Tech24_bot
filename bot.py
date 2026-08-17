@@ -657,7 +657,7 @@ def format_weekly_summary_matrix(cases):
 
     for tech in ALLOWED_TECHNICIANS:
         stats = tech_stats[tech]
-        report_lines.append(f" 👤 Technician *{tech}*: {stats['completed']} completed, {stats['ongoing']} ongoing.\n")
+        report_lines.append(f" 👤 Technician *{tech\n}*: {stats['completed']} completed,\n {stats['ongoing']} ongoing.\n")
 
     report_lines.append(f"\n 🟧 Total in *Adama District*: {total_completed} completed, {total_ongoing} ongoing cases.")
     if other_district_or_unassigned > 0: report_lines.append(f" 🔍 Unassigned / Other District Cases: *{other_district_or_unassigned}*")
@@ -764,7 +764,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE: return await update.message.reply_text(get_maintenance_message(), parse_mode="Markdown")
     keyboard = [[InlineKeyboardButton(f"👤 {tech}", callback_data=f"wrep_{tech}")] for tech in sorted(ALLOWED_TECHNICIANS)]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")])
-    await update.message.reply_text("📊 *Weekly Report Menu*\n\n 👥 Select an Adama District Technician to view their weekly cases report (Sunday - Saturday):", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("📊 *Weekly Report Menu*\n\n 👥 Select an Adama District Technician to view their weekly cases report:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_id(update.effective_chat.id)
